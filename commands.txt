@@ -1,0 +1,6 @@
+stdin to client
+- [pid] start [n] [port]
+
+messages to client
+- [response len]-[response]
+client to server
