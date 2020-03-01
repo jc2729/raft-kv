@@ -20,7 +20,7 @@ DESCRIPTOR = _descriptor.FileDescriptor(
   package='rpc',
   syntax='proto2',
   serialized_options=None,
-  serialized_pb=_b('\n\trpc.proto\x12\x03rpc\"\x81\x07\n\x03Rpc\x12\x1b\n\x04type\x18\x01 \x02(\x0e\x32\r.rpc.Rpc.Type\x12%\n\x07voteReq\x18\x02 \x01(\x0b\x32\x14.rpc.Rpc.RequestVote\x12(\n\x07voteRes\x18\x03 \x01(\x0b\x32\x17.rpc.Rpc.RequestVoteRes\x12\x30\n\x10\x61ppendEntriesReq\x18\x04 \x01(\x0b\x32\x16.rpc.Rpc.AppendEntries\x12\x33\n\x10\x61ppendEntriesRes\x18\x05 \x01(\x0b\x32\x19.rpc.Rpc.AppendEntriesRes\x12/\n\x0chandshakeReq\x18\x06 \x01(\x0b\x32\x19.rpc.Rpc.RequestHandshake\x12\x32\n\x0chandshakeRes\x18\x07 \x01(\x0b\x32\x1c.rpc.Rpc.RequestHandshakeRes\x1a[\n\x0bRequestVote\x12\x0c\n\x04term\x18\x01 \x02(\x05\x12\x13\n\x0b\x63\x61ndidateId\x18\x02 \x02(\x05\x12\x14\n\x0clastLogIndex\x18\x03 \x02(\x05\x12\x13\n\x0blastLogTerm\x18\x04 \x02(\x05\x1a?\n\x0eRequestVoteRes\x12\x0c\n\x04term\x18\x01 \x02(\x05\x12\x13\n\x0bvoteGranted\x18\x02 \x02(\x08\x12\n\n\x02id\x18\x03 \x02(\x05\x1a\x90\x01\n\rAppendEntries\x12\x0c\n\x04term\x18\x01 \x02(\x05\x12\x10\n\x08leaderId\x18\x02 \x02(\x05\x12\x14\n\x0cprevLogIndex\x18\x03 \x02(\x05\x12\x13\n\x0bprevLogTerm\x18\x04 \x02(\x05\x12\x1e\n\x07\x65ntries\x18\x05 \x03(\x0b\x32\r.rpc.LogEntry\x12\x14\n\x0cleaderCommit\x18\x06 \x02(\x05\x1a=\n\x10\x41ppendEntriesRes\x12\x0c\n\x04term\x18\x01 \x02(\x05\x12\x0f\n\x07success\x18\x02 \x02(\x08\x12\n\n\x02id\x18\x03 \x02(\x05\x1a\x1e\n\x10RequestHandshake\x12\n\n\x02id\x18\x01 \x02(\x05\x1a!\n\x13RequestHandshakeRes\x12\n\n\x02id\x18\x01 \x02(\x05\"\x8c\x01\n\x04Type\x12\x10\n\x0cREQUEST_VOTE\x10\x00\x12\x14\n\x10REQUEST_VOTE_RES\x10\x01\x12\x12\n\x0e\x41PPEND_ENTRIES\x10\x02\x12\x16\n\x12\x41PPEND_ENTRIES_RES\x10\x03\x12\x15\n\x11REQUEST_HANDSHAKE\x10\x04\x12\x19\n\x15REQUEST_HANDSHAKE_RES\x10\x05\")\n\x08LogEntry\x12\x0f\n\x07\x63ommand\x18\x01 \x02(\t\x12\x0c\n\x04term\x18\x02 \x02(\x05')
+  serialized_pb=_b('\n\trpc.proto\x12\x03rpc\"\xbb\x07\n\x03Rpc\x12\x1b\n\x04type\x18\x01 \x02(\x0e\x32\r.rpc.Rpc.Type\x12%\n\x07voteReq\x18\x02 \x01(\x0b\x32\x14.rpc.Rpc.RequestVote\x12(\n\x07voteRes\x18\x03 \x01(\x0b\x32\x17.rpc.Rpc.RequestVoteRes\x12\x30\n\x10\x61ppendEntriesReq\x18\x04 \x01(\x0b\x32\x16.rpc.Rpc.AppendEntries\x12\x33\n\x10\x61ppendEntriesRes\x18\x05 \x01(\x0b\x32\x19.rpc.Rpc.AppendEntriesRes\x12/\n\x0chandshakeReq\x18\x06 \x01(\x0b\x32\x19.rpc.Rpc.RequestHandshake\x12\x32\n\x0chandshakeRes\x18\x07 \x01(\x0b\x32\x1c.rpc.Rpc.RequestHandshakeRes\x1a\x64\n\x0bRequestVote\x12\x15\n\rcandidateTerm\x18\x01 \x02(\x05\x12\x13\n\x0b\x63\x61ndidateId\x18\x02 \x02(\x05\x12\x14\n\x0clastLogIndex\x18\x03 \x02(\x05\x12\x13\n\x0blastLogTerm\x18\x04 \x02(\x05\x1aV\n\x0eRequestVoteRes\x12\x0c\n\x04term\x18\x01 \x02(\x05\x12\x13\n\x0bvoteGranted\x18\x02 \x02(\x08\x12\n\n\x02id\x18\x03 \x02(\x05\x12\x15\n\rcandidateTerm\x18\x04 \x02(\x05\x1a\x96\x01\n\rAppendEntries\x12\x12\n\nleaderTerm\x18\x01 \x02(\x05\x12\x10\n\x08leaderId\x18\x02 \x02(\x05\x12\x14\n\x0cprevLogIndex\x18\x03 \x02(\x05\x12\x13\n\x0bprevLogTerm\x18\x04 \x02(\x05\x12\x1e\n\x07\x65ntries\x18\x05 \x03(\x0b\x32\r.rpc.LogEntry\x12\x14\n\x0cleaderCommit\x18\x06 \x02(\x05\x1aQ\n\x10\x41ppendEntriesRes\x12\x0c\n\x04term\x18\x01 \x02(\x05\x12\x0f\n\x07success\x18\x02 \x02(\x08\x12\n\n\x02id\x18\x03 \x02(\x05\x12\x12\n\nleaderTerm\x18\x04 \x02(\x05\x1a\x1e\n\x10RequestHandshake\x12\n\n\x02id\x18\x01 \x02(\x05\x1a!\n\x13RequestHandshakeRes\x12\n\n\x02id\x18\x01 \x02(\x05\"\x8c\x01\n\x04Type\x12\x10\n\x0cREQUEST_VOTE\x10\x00\x12\x14\n\x10REQUEST_VOTE_RES\x10\x01\x12\x12\n\x0e\x41PPEND_ENTRIES\x10\x02\x12\x16\n\x12\x41PPEND_ENTRIES_RES\x10\x03\x12\x15\n\x11REQUEST_HANDSHAKE\x10\x04\x12\x19\n\x15REQUEST_HANDSHAKE_RES\x10\x05\")\n\x08LogEntry\x12\x0f\n\x07\x63ommand\x18\x01 \x02(\t\x12\x0c\n\x04term\x18\x02 \x02(\x05')
 )
 
 
@@ -58,8 +58,8 @@ _RPC_TYPE = _descriptor.EnumDescriptor(
   ],
   containing_type=None,
   serialized_options=None,
-  serialized_start=776,
-  serialized_end=916,
+  serialized_start=834,
+  serialized_end=974,
 )
 _sym_db.RegisterEnumDescriptor(_RPC_TYPE)
 
@@ -72,7 +72,7 @@ _RPC_REQUESTVOTE = _descriptor.Descriptor(
   containing_type=None,
   fields=[
     _descriptor.FieldDescriptor(
-      name='term', full_name='rpc.Rpc.RequestVote.term', index=0,
+      name='candidateTerm', full_name='rpc.Rpc.RequestVote.candidateTerm', index=0,
       number=1, type=5, cpp_type=1, label=2,
       has_default_value=False, default_value=0,
       message_type=None, enum_type=None, containing_type=None,
@@ -112,7 +112,7 @@ _RPC_REQUESTVOTE = _descriptor.Descriptor(
   oneofs=[
   ],
   serialized_start=340,
-  serialized_end=431,
+  serialized_end=440,
 )
 
 _RPC_REQUESTVOTERES = _descriptor.Descriptor(
@@ -143,6 +143,13 @@ _RPC_REQUESTVOTERES = _descriptor.Descriptor(
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR),
+    _descriptor.FieldDescriptor(
+      name='candidateTerm', full_name='rpc.Rpc.RequestVoteRes.candidateTerm', index=3,
+      number=4, type=5, cpp_type=1, label=2,
+      has_default_value=False, default_value=0,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR),
   ],
   extensions=[
   ],
@@ -155,8 +162,8 @@ _RPC_REQUESTVOTERES = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=433,
-  serialized_end=496,
+  serialized_start=442,
+  serialized_end=528,
 )
 
 _RPC_APPENDENTRIES = _descriptor.Descriptor(
@@ -167,7 +174,7 @@ _RPC_APPENDENTRIES = _descriptor.Descriptor(
   containing_type=None,
   fields=[
     _descriptor.FieldDescriptor(
-      name='term', full_name='rpc.Rpc.AppendEntries.term', index=0,
+      name='leaderTerm', full_name='rpc.Rpc.AppendEntries.leaderTerm', index=0,
       number=1, type=5, cpp_type=1, label=2,
       has_default_value=False, default_value=0,
       message_type=None, enum_type=None, containing_type=None,
@@ -220,8 +227,8 @@ _RPC_APPENDENTRIES = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=499,
-  serialized_end=643,
+  serialized_start=531,
+  serialized_end=681,
 )
 
 _RPC_APPENDENTRIESRES = _descriptor.Descriptor(
@@ -252,6 +259,13 @@ _RPC_APPENDENTRIESRES = _descriptor.Descriptor(
       message_type=None, enum_type=None, containing_type=None,
       is_extension=False, extension_scope=None,
       serialized_options=None, file=DESCRIPTOR),
+    _descriptor.FieldDescriptor(
+      name='leaderTerm', full_name='rpc.Rpc.AppendEntriesRes.leaderTerm', index=3,
+      number=4, type=5, cpp_type=1, label=2,
+      has_default_value=False, default_value=0,
+      message_type=None, enum_type=None, containing_type=None,
+      is_extension=False, extension_scope=None,
+      serialized_options=None, file=DESCRIPTOR),
   ],
   extensions=[
   ],
@@ -264,8 +278,8 @@ _RPC_APPENDENTRIESRES = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=645,
-  serialized_end=706,
+  serialized_start=683,
+  serialized_end=764,
 )
 
 _RPC_REQUESTHANDSHAKE = _descriptor.Descriptor(
@@ -294,8 +308,8 @@ _RPC_REQUESTHANDSHAKE = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=708,
-  serialized_end=738,
+  serialized_start=766,
+  serialized_end=796,
 )
 
 _RPC_REQUESTHANDSHAKERES = _descriptor.Descriptor(
@@ -324,8 +338,8 @@ _RPC_REQUESTHANDSHAKERES = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=740,
-  serialized_end=773,
+  serialized_start=798,
+  serialized_end=831,
 )
 
 _RPC = _descriptor.Descriptor(
@@ -398,7 +412,7 @@ _RPC = _descriptor.Descriptor(
   oneofs=[
   ],
   serialized_start=19,
-  serialized_end=916,
+  serialized_end=974,
 )
 
 
@@ -435,8 +449,8 @@ _LOGENTRY = _descriptor.Descriptor(
   extension_ranges=[],
   oneofs=[
   ],
-  serialized_start=918,
-  serialized_end=959,
+  serialized_start=976,
+  serialized_end=1017,
 )
 
 _RPC_REQUESTVOTE.containing_type = _RPC
