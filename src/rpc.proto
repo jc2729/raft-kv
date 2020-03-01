@@ -19,7 +19,7 @@ message Rpc {
 	}
 
 	message RequestVote {
-		required int32 term = 1;
+		required int32 candidateTerm = 1;
 		required int32 candidateId = 2;
 		required int32 lastLogIndex = 3;
 		required int32 lastLogTerm = 4;
@@ -29,10 +29,11 @@ message Rpc {
 		required int32 term = 1;
 		required bool voteGranted = 2;
 		required int32 id = 3;
+		required int32 candidateTerm = 4;
 	}
 
 	message AppendEntries {
-		required int32 term = 1;
+		required int32 leaderTerm = 1;
 		required int32 leaderId = 2;
 		required int32 prevLogIndex = 3;
 		required int32 prevLogTerm = 4;
@@ -44,6 +45,7 @@ message Rpc {
 		required int32 term = 1;
 		required bool success = 2;
 		required int32 id = 3;
+		required int32 leaderTerm = 4;
 	}
 
 	message RequestHandshake {

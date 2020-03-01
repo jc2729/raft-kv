@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import random
 import rpc_pb2 as rpc
 import selectors
 import socket
@@ -57,8 +58,6 @@ class Server():
 
     # map server IDs to sockets
     self.id_to_sock = {}
-
-    self.id_to_sock[self.server_id] = None
     
     # establish connections to all preceding servers
     for i in range(n):
@@ -87,19 +86,29 @@ class Server():
 
     # raft-specific persistent state on ALL servers
     self.current_term = 0
-    self.voted_for = None
-    self.log = []
+    self.voted_for = None # reset always when current term changes
+    self.log = {} # log[index] = (cmd, term)
 
     # volatile state on ALL servers
     self.commit_index = 0
     self.last_applied = 0
 
+    self.state = 'follower' # valid states: 'follower', 'leader', 'candidate'
+    self.election_timeout = random.randint(150,300)
+    self.election_timer = threading.Timer(self.election_timeout/1000, self.convert_to_candidate)
+    self.heartbeat_timer = None
+    self.leader = None
+
     # volatile state ONLY for leaders, None otherwise
     self.match_index = None
     self.next_index = None
-
     # TODO. array of queues for retrying indefinitely for servers that have failed
     self.pending_rpcs = None
+
+    # state for candidates
+    self.vote_count = 0 
+
+    
 
   def crash(self):
     """
@@ -107,17 +116,158 @@ class Server():
     """
     sys.exit(0)
 
+  def convert_to_follower(self):
+  	if self.state == 'candidate':
+  		pass
+  	elif self.state == 'leader':
+  		self.leader = None
+  		self.pending_rpcs = None
+  		self.match_index = None
+  		self.next_index = None
+  	elif self.state == 'follower':
+  		pass
+  	self.state = 'follower'
+
+
+  def send(self, msg, sock):
+    try:
+    	sock.send((text_format.MessageToString(msg) + '*').encode('utf-8'))
+    except Exception:
+    	print('failure to send')
+    	pass
+
+  def convert_to_candidate(self):
+  	self.state = 'candidate'
+  	self.leader = None
+  	self.start_election()
+
+  def convert_to_leader(self):
+  	self.election_timer.cancel()
+  	self.state = 'leader'
+  	self.leader = self.server_id
+  	self.send_heartbeats()
+
+
+  def reset_election_timer(self):
+  	self.election_timer.cancel()
+  	self.election_timer = threading.Timer(self.election_timeout/1000, self.convert_to_candidate)
+	self.election_timer.start()
+
+  def start_election(self):
+  	self.current_term += 1
+  	self.vote_count = 0
+  	msg = rpc.Rpc()
+    msg.type = rpc.Rpc.REQUEST_VOTE
+    msg.voteReq.candidateTerm = self.current_term
+    last_log_idx = max(self.log)
+    msg.voteReq.lastLogIndex = last_log_idx
+    msg.voteReq.lastLogTerm = self.log[last_log_idx][1]
+    self.vote_count += 1
+    for i in self.id_to_sock:
+    	self.send(msg, self.id_to_sock[i])
+    self.reset_election_timer()
+
   def handle_handshake_req(self, handshake_req, sock):
     self.id_to_sock[handshake_req.id] = sock
     print(self.server_id, 'got handshake req from', handshake_req.id)
     msg = rpc.Rpc()
     msg.type = rpc.Rpc.REQUEST_HANDSHAKE_RES
     msg.handshakeRes.id = self.server_id
-    sock.send((text_format.MessageToString(msg) + '*').encode('utf-8'))
+    self.send(msg, sock)
 
   def handle_handshake_res(self, handshake_res, sock):
     self.id_to_sock[handshake_res.id] = sock
     print(self.server_id, 'got handshake res from', handshake_res.id)
+
+  def handle_vote_req(self, vote_req, sock):
+  	msg = rpc.Rpc()
+    msg.type = rpc.Rpc.REQUEST_VOTE_RES
+    msg.voteRes.id = self.server_id
+
+    if vote_req.candidateTerm < self.current_term:
+      msg.voteRes.voteGranted = False
+    
+    else:
+    	if self.current_term < vote_req.candidateTerm:
+    		self.convert_to_follower()
+    		self.current_term = vote_req.candidateTerm
+	    	self.voted_for = None
+    	last_log_idx = max(self.log)
+    	if (self.voted_for = None or self.voted_for == vote_req.candidateId) and log_comparison(vote_req.lastLogIndex, vote_req.lastLogTerm, last_log_idx, self.log[last_log_idx]) >= 0:
+    		msg.voteRes.voteGranted = True
+    		self.voted_for = vote_req.candidateId
+    	else:
+    		msg.voteRes.voteGranted = False
+    	self.reset_election_timer() # only reset if vote is granted
+    msg.voteRes.term = self.current_term
+    self.send(msg, sock)
+
+  def handle_vote_res(self, vote_res, sock):
+    if vote_res.term > self.current_term:
+    	self.current_term = vote_res.term
+    	self.convert_to_follower()
+    	return
+    if vote_res.candidateTerm != self.current_term:
+    	return
+    self.vote_count += 1
+    if self.vote_count >= int(self.n/2 + 1):
+    	self.convert_to_leader()
+    pass
+
+  def send_heartbeats(self):
+  	self.heartbeat_timer = threading.Timer(self.election_timeout/1000, self.send_heartbeats)
+  	msg = rpc.Rpc()
+    msg.type = rpc.Rpc.APPEND_ENTRIES
+    msg.appendEntries.term = self.current_term
+    msg.appendEntries.leaderId = self.server_id
+    msg.appendEntries.prevLogIndex = 0 # TODO
+    msg.appendEntries.prevLogTerm = 0 # TODO
+    msg.appendEntries.entries = []
+    msg.appendEntries.leaderCommit = self.commit_index
+
+    for i in self.id_to_sock:
+    	self.send(msg, self.id_to_sock[i])
+
+  def handle_append_entries(self, append_entries, sock):
+  	msg = rpc.Rpc()
+    msg.type = rpc.Rpc.APPEND_ENTRIES_RES
+    msg.appendEntriesRes.term = self.current_term
+
+    if append_entries.term < self.current_term:
+    	msg.appendEntriesRes.success = False
+    	self.send(msg, sock)
+    	return
+    elif self.state == 'candidate':
+    	self.convert_to_follower()
+    	self.current_term = append_entries.term
+    	# TODO FINISH PROCESSING AE
+    	msg.appendEntriesRes.success = True
+    	self.send(msg, sock)
+    	self.reset_election_timer()
+    self.leader = append_entries.leaderId
+  
+  def handle_append_entries_res(self, append_entries_res, sock):
+  	if append_entries_res.term > self.current_term:
+  		self.convert_to_follower()
+  		return
+  	if append_entries_res.leaderTerm != self.current_term:
+  		return
+  	# TODO FINISH PROCESSING AE
+
+
+
+  def log_comparison(last_log_idx_1, last_log_term_1, last_log_idx_2, last_log_idx_2):
+  """
+  returns:
+  	> 0 if log 1 is more up-to-date
+  	0 if log 1 and 2 are equally up-to-date
+  	< 0 otherwise
+  """
+    if last_log_term_1 > last_log_idx_2:
+    	return 1
+    elif last_log_term_1 < last_log_idx_2:
+    	return -1
+    return last_log_idx_1 - last_log_idx_2
 
   def accept_wrapper(self, sock):
     """
@@ -139,7 +289,7 @@ class Server():
       msg.type = rpc.Rpc.REQUEST_HANDSHAKE
       msg.handshakeReq.id = self.server_id
       try:
-        conn.send((text_format.MessageToString(msg) + '*').encode('utf-8'))
+        self.send(msg, conn)
       except Exception as e:
         print('Error connecting! ', self.server_id, e)
 
@@ -179,6 +329,13 @@ class Server():
                 self.handle_handshake_req(msg.handshakeReq, sock)
               elif msg.type == rpc.Rpc.REQUEST_HANDSHAKE_RES:
                 self.handle_handshake_res(msg.handshakeRes, sock)
+              elif msg.type == rpc.Rpc.REQUEST_VOTE:
+                self.handle_vote_req(msg.voteReq, sock)
+              elif msg.type == rpc.Rpc.REQUEST_HANDSHAKE_RES:
+                self.handle_vote_res(msg.voteRes, sock)
+              elif msg.type == rpc.Rpc.APPEND_ENTRIES:
+              	self.handle_append_entries(msg.appendEntries, sock)
+
         else:
           self.process_connection_fail(sock)
       except ConnectionError:
@@ -188,6 +345,7 @@ class Server():
     """
     Starts the server
     """
+    self.election_timer.start()
     while True:
       events = self.sel.select(timeout=None)
       for key, mask in events:
