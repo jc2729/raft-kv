@@ -157,6 +157,8 @@ def main(debug=False):
             time.sleep(0.1)
         elif cmd == 'crash':
             send(pid, cmd)
+        elif cmd == 'set':
+            send(pid, cmd)
         time.sleep(2)
 
 

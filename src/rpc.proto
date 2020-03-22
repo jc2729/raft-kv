@@ -37,7 +37,7 @@ message Rpc {
 		required int32 leaderId = 2;
 		required int32 prevLogIndex = 3;
 		required int32 prevLogTerm = 4;
-		repeated LogEntry entries = 5;
+		map<int32, LogEntry> entries = 5;
 		required int32 leaderCommit = 6;
 	}
 
@@ -58,7 +58,7 @@ message Rpc {
 }
 
 message LogEntry {
-	required string command = 1;
+	required string command = 1; // for now, support [var]=[value]
 	required int32 term = 2; // term when entry was received by leader
 }
 
