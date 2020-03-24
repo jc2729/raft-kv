@@ -40,7 +40,7 @@ class ClientHandler(Thread):
                 if (res_len == 0):
                     if (len(self.buffer) < 4):
                         # Not long enough for response length
-                        data = self.sock.recv(1024)
+                        data = str(self.sock.recv(1024))
                         self.buffer += data
                     else:
                         (res_len,res)= self.buffer.split("-",1)
@@ -49,7 +49,7 @@ class ClientHandler(Thread):
                 else:
                     # Message has not yet been fully received
                     if (len(self.buffer)<res_len):
-                        data = self.sock.recv(1024)
+                        data = str(self.sock.recv(1024))
                         self.buffer += data
                     else:
                         self.handle_msg(self.buffer[0:res_len])
@@ -73,7 +73,7 @@ class ClientHandler(Thread):
 
     def send(self, s):
         if self.valid:
-            self.sock.send(str(s) + '*')
+            self.sock.send((str(s) + '*').encode('utf-8'))
         else:
             print ("Socket invalid")
 

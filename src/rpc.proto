@@ -46,6 +46,7 @@ message Rpc {
 		required bool success = 2;
 		required int32 id = 3;
 		required int32 leaderTerm = 4;
+		optional int32 lastLogIndex = 5;
 	}
 
 	message RequestHandshake {

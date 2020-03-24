@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import constant
 import logging
 import random
 import rpc_pb2 as rpc
@@ -57,7 +58,8 @@ class Server():
     self.client_csock = None
 
     # map server IDs to sockets
-    self.id_to_sock = {}
+    self.id_to_sock = {server:None for server in range(self.n)}
+    del self.id_to_sock[self.server_id]
     
     # establish connections to all preceding servers
     for i in range(n):
@@ -94,12 +96,16 @@ class Server():
     # volatile state on ALL servers
     self.commit_index = 0
     self.last_applied = 0
+    self.state = {}
 
-    self.state = 'follower' # valid states: 'follower', 'leader', 'candidate'
-    self.election_timeout = random.randint(5000,10000) # slowed to allow sufficient time to see changes
+    self.role = 'follower' # valid states: 'follower', 'leader', 'candidate'
+    self.election_timeout_lower = 5000
+    self.election_timeout = random.randint(self.election_timeout_lower,self.election_timeout_lower*2) # slowed to allow sufficient time to see changes
     self.election_timer = threading.Timer(self.election_timeout/1000, self.convert_to_candidate)
     self.election_timer.daemon = True
-    self.heartbeat_timer = threading.Timer(self.election_timeout/1000, self.send_heartbeats)
+    # https://www.cl.cam.ac.uk/~ms705/pub/papers/2015-osr-raft.pdf section 4
+    self.leader_timeout = self.election_timeout_lower/2
+    self.heartbeat_timer = threading.Timer(self.leader_timeout/1000, self.send_heartbeats)
     self.heartbeat_timer.daemon = True
     self.leader = None
 
@@ -122,15 +128,15 @@ class Server():
     try:
         sock.send((text_format.MessageToString(msg) + '*').encode('utf-8'))
     except Exception:
-        print('failure to send')
+        pass
 
   def convert_to_follower(self):
     '''
     precond: has lock
     '''
-    state = 'leader'
-    self.state = 'follower'
-    if state == 'leader':
+    role = 'leader'
+    self.role = 'follower'
+    if role == 'leader':
         self.leader = None
         self.pending_rpcs = None
         self.match_index = None
@@ -144,13 +150,13 @@ class Server():
     msg = rpc.Rpc()
     msg.type = rpc.Rpc.REQUEST_VOTE
     with self.lock:
-        self.state = 'candidate'
+        self.role = 'candidate'
         self.leader = None
         self.current_term += 1
         msg.voteReq.candidateTerm = self.current_term
-        last_log_idx = 0 if len(self.log) == 0 else max(self.log)
+        last_log_idx = self.last_log_index(self.log)
         msg.voteReq.lastLogIndex = last_log_idx
-        msg.voteReq.lastLogTerm = -1 if last_log_idx == 0 else self.log[last_log_idx][1]
+        msg.voteReq.lastLogTerm = constant.EMPTY_LOG_LAST_LOG_TERM if last_log_idx == constant.EMPTY_LOG_LAST_LOG_INDEX else self.log[last_log_idx][1]
         self.voted_for = self.server_id
         self.vote_count = 1
         self.reset_election_timer()
@@ -185,8 +191,8 @@ class Server():
             self.current_term = vote_req.candidateTerm
             self.voted_for = None
             msg.voteRes.term = self.current_term
-        last_log_idx = 0 if len(self.log) == 0 else max(self.log)
-        last_log_term = -1 if last_log_idx == 0 else self.log[last_log_idx][1]
+        last_log_idx = self.last_log_index(self.log)
+        last_log_term = constant.EMPTY_LOG_LAST_LOG_TERM if last_log_idx == constant.EMPTY_LOG_LAST_LOG_INDEX else self.log[last_log_idx][1]
         if (self.voted_for is None or self.voted_for == vote_req.candidateId) and self.log_comparison(vote_req.lastLogIndex, vote_req.lastLogTerm, last_log_idx, last_log_term) >= 0:
             msg.voteRes.voteGranted = True
             self.voted_for = vote_req.candidateId
@@ -212,39 +218,43 @@ class Server():
         return
     self.vote_count += 1
     print(self.server_id, 'vote count', self.vote_count)
-    if self.vote_count >= int(self.n/2 + 1):
-        if self.state == 'leader':
-            return
+    if self.role != 'leader' and self.vote_count >= int(self.n/2 + 1):
         # convert to leader
-        self.state = 'leader'
+        self.role = 'leader'
         self.leader = self.server_id
         # establish self as leader
-        msg = self.heartbeat_rpc(self.current_term, self.commit_index)
+        
         self.election_timer.cancel()
-        self.lock.release()
+        next_index = self.last_log_index(self.log) + 1
+        self.next_index = {server:next_index for server in range(self.n)}
+        self.match_index = {server:0 for server in range(self.n)}
         
         for i in self.id_to_sock:
+            msg = self.heartbeat_rpc(i, self.current_term, self.commit_index, self.log)
             self.send(msg, self.id_to_sock[i])
-        self.heartbeat_timer = threading.Timer(self.election_timeout/1000, self.send_heartbeats)
+        self.heartbeat_timer = threading.Timer(self.leader_timeout/1000, self.send_heartbeats)
         self.heartbeat_timer.daemon = True
         self.heartbeat_timer.start()
         print(self.server_id, 'became leader')
+    self.lock.release()
         
-  def heartbeat_rpc(self, current_term, commit_index):
+  def heartbeat_rpc(self, receiver, current_term, commit_index, log):
     msg = rpc.Rpc()
     msg.type = rpc.Rpc.APPEND_ENTRIES
     msg.appendEntriesReq.leaderTerm = current_term
     msg.appendEntriesReq.leaderId = self.server_id
     msg.appendEntriesReq.leaderCommit = commit_index
-    msg.appendEntriesReq.entries.extend([])
+    last_log_idx = self.last_log_index(log)
+    msg.appendEntriesReq.prevLogIndex = last_log_idx
+    msg.appendEntriesReq.prevLogTerm = constant.EMPTY_LOG_LAST_LOG_TERM if last_log_idx == constant.EMPTY_LOG_LAST_LOG_INDEX else self.log[last_log_idx][1]
     return msg
 
   def send_heartbeats(self):
     with self.lock:
-        msg = self.heartbeat_rpc(self.current_term, self.commit_index)
-    for i in self.id_to_sock:
+      for i in self.id_to_sock:
+        msg = self.heartbeat_rpc(i, self.current_term, self.commit_index, self.log)
         self.send(msg, self.id_to_sock[i])
-    self.heartbeat_timer = threading.Timer(self.election_timeout/1000, self.send_heartbeats)
+    self.heartbeat_timer = threading.Timer(self.leader_timeout/1000, self.send_heartbeats)
     self.heartbeat_timer.daemon = True
     self.heartbeat_timer.start()
 
@@ -267,9 +277,37 @@ class Server():
             self.convert_to_follower()
         self.current_term = append_entries_req.leaderTerm
         self.leader = append_entries_req.leaderId
+        # vacuously true if leader has no entries
+        if append_entries_req.prevLogIndex == constant.EMPTY_LOG_LAST_LOG_INDEX and len(append_entries_req.entries) == 0:
+          self.lock.release()
+          msg.appendEntriesRes.success = True
+          msg.appendEntriesRes.term = append_entries_req.leaderTerm
+          msg.appendEntriesRes.lastLogIndex = constant.EMPTY_LOG_LAST_LOG_INDEX
+          self.send(msg, sock)
+          self.reset_election_timer()
+          return
+        if append_entries_req.prevLogIndex not in self.log or self.log[append_entries_req.prevLogIndex][1] != append_entries_req.prevLogTerm:
+          self.lock.release()
+          msg.appendEntriesRes.success = False
+          msg.appendEntriesRes.term = append_entries_req.leaderTerm
+          self.send(msg, sock)
+          self.reset_election_timer()
+          return
+        last_new_idx = self.commit_index
+        for (idx, entry) in sorted(append_entries_req.entries):
+          if idx not in self.log:
+            self.log[idx] = entry
+            last_new_idx = idx
+          elif idx in self.log and entry.term != self.log[idx][1]:
+            self.log = {l:self.log[l] for l in self.log if l < idx}
+            self.log[idx] = entry
+            last_new_idx = idx
+        if append_entries_req.leaderCommit > self.commit_index:
+          self.commit_index = min(append_entries_req.leaderCommit, last_new_idx)
+          self.apply_committed()
         self.reset_election_timer()
+        msg.appendEntriesRes.lastLogIndex = self.last_log_index(self.log)
         self.lock.release()
-        # TODO FINISH PROCESSING AE
         msg.appendEntriesRes.success = True
         msg.appendEntriesRes.term = append_entries_req.leaderTerm
         self.send(msg, sock)
@@ -282,9 +320,19 @@ class Server():
             self.convert_to_follower()
             return
         if append_entries_res.leaderTerm != self.current_term:
-            pass
-    # TODO FINISH PROCESSING AE
+            return
+        follower = append_entries_res.id
+        if append_entries_res.success:
+          # TODO update follower nextIndex and matchIndex
+          # must use append_entries_res.lastLogIndex
+          # TODO apply potentially
+          return
+        next_index[follower] -= 1
+        # TODO construct AE RPC
 
+  def last_log_index(self, log):
+    return constant.EMPTY_LOG_LAST_LOG_INDEX if len(log) == 0 else max(log)
+    
   def log_comparison(self, last_log_idx_1, last_log_term_1, last_log_idx_2, last_log_term_2):
     """
     returns:
@@ -309,6 +357,9 @@ class Server():
   def handle_handshake_res(self, handshake_res, sock):
     self.id_to_sock[handshake_res.id] = sock
     print(self.server_id, 'got handshake res from', handshake_res.id)
+
+  def apply_committed(self):
+    pass
 
   def accept_wrapper(self, sock):
     """
@@ -361,7 +412,6 @@ class Server():
               cmd = payload.split()[0] 
               if cmd == 'crash':
                 self.crash()
-              pass
             else:
               msg = rpc.Rpc()
               text_format.Parse(payload, msg)
