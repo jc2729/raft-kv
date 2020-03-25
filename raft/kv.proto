@@ -1,0 +1,42 @@
+syntax = "proto2";
+package kv;
+
+message RaftRequest {
+	enum Type {
+		CRASH = 0;
+		KV_REQ = 1;
+	}
+	required Type type = 1;
+	optional KVRequest request = 2;
+}
+
+message KVRequest {
+	required int32 serialNo = 1;
+	required Action action = 2; // 'get as in get all', 'put'
+	repeated string cmd = 3;
+}
+
+message RaftResponse {
+	required Type type = 1;
+	optional Redirect redirect = 2;
+	optional Result result = 3;
+
+	enum Type {
+		REDIRECT = 0;
+		KV_RES = 1;
+	}
+	message Redirect {
+		required KVRequest originalRequest = 1;
+		required int32 leaderId = 2;
+	}
+	message Result {
+		required int32 serialNo = 1;
+		required Action action = 2;
+		repeated string state = 3;
+	}
+}
+
+enum Action {
+	GET = 0;
+	PUT = 1;
+}

@@ -5,6 +5,7 @@ import constant
 import logging
 import random
 import rpc_pb2 as rpc
+import kv_pb2 as kv
 import selectors
 import socket
 import sys
@@ -95,8 +96,10 @@ class Server():
 
     # volatile state on ALL servers
     self.commit_index = 0
+    self.processed_serial_nos = {}
     self.last_applied = 0
     self.state = {}
+    self.latest_client_res = ()
 
     self.role = 'follower' # valid states: 'follower', 'leader', 'candidate'
     self.election_timeout_lower = 5000
@@ -109,14 +112,27 @@ class Server():
     self.heartbeat_timer.daemon = True
     self.leader = None
 
+    self.application_thr = threading.Thread(name='application_thr', target=self.apply_committed)
+    self.application_thr.daemon = True
+    self.application_thr_cv = threading.Condition(lock=self.lock)
+    self.application_thr.start()
+    
+
     # volatile state ONLY for leaders, None otherwise
     self.match_index = None
     self.next_index = None
+    self.client_requests = {}
     # TODO. array of queues for retrying indefinitely for servers that have failed
     self.pending_rpcs = None
 
     # state for candidates
     self.vote_count = 0
+
+  def exec_command(self, cmd: str):
+    if 'get' in cmd:
+      return
+    var_val = cmd.split('=') 
+    self.store[var_val[0]]=[var_val[1]]
 
   def crash(self):
     """
@@ -174,6 +190,15 @@ class Server():
     self.election_timer.daemon = True
     self.election_timer.start()
 
+  def reset_heartbeat_timer(self):
+    '''
+    precond: has lock
+    '''
+    self.heartbeat_timer.cancel()
+    self.heartbeat_timer = threading.Timer(self.leader_timeout/1000, self.send_heartbeats)
+    self.heartbeat_timer.daemon = True
+    self.heartbeat_timer.start()
+
   def handle_vote_req(self, vote_req, sock):
     msg = rpc.Rpc()
     msg.type = rpc.Rpc.REQUEST_VOTE_RES
@@ -228,9 +253,9 @@ class Server():
         next_index = self.last_log_index(self.log) + 1
         self.next_index = {server:next_index for server in range(self.n)}
         self.match_index = {server:0 for server in range(self.n)}
-        
+        self.client_rpcs = {}
         for i in self.id_to_sock:
-            msg = self.heartbeat_rpc(i, self.current_term, self.commit_index, self.log)
+            msg = self.append_entries_rpc(i, self.current_term, self.commit_index, self.log, True)
             self.send(msg, self.id_to_sock[i])
         self.heartbeat_timer = threading.Timer(self.leader_timeout/1000, self.send_heartbeats)
         self.heartbeat_timer.daemon = True
@@ -238,21 +263,28 @@ class Server():
         print(self.server_id, 'became leader')
     self.lock.release()
         
-  def heartbeat_rpc(self, receiver, current_term, commit_index, log):
+  def append_entries_rpc(self, receiver, current_term, commit_index, log, is_heartbeat, receiver_next_index=-1):
     msg = rpc.Rpc()
     msg.type = rpc.Rpc.APPEND_ENTRIES
     msg.appendEntriesReq.leaderTerm = current_term
     msg.appendEntriesReq.leaderId = self.server_id
     msg.appendEntriesReq.leaderCommit = commit_index
-    last_log_idx = self.last_log_index(log)
-    msg.appendEntriesReq.prevLogIndex = last_log_idx
-    msg.appendEntriesReq.prevLogTerm = constant.EMPTY_LOG_LAST_LOG_TERM if last_log_idx == constant.EMPTY_LOG_LAST_LOG_INDEX else self.log[last_log_idx][1]
+    if is_heartbeat:
+      last_log_idx = self.last_log_index(log)
+      msg.appendEntriesReq.prevLogIndex = last_log_idx
+      msg.appendEntriesReq.prevLogTerm = constant.EMPTY_LOG_LAST_LOG_TERM if last_log_idx == constant.EMPTY_LOG_LAST_LOG_INDEX else log[last_log_idx][1]
+      return msg
+    msg.appendEntriesReq.entries.extend([rpc.LogEntry(command, term) for k in log if k >= receiver_next_index ])
+    prev_log_idx = receiver_next_index - 1
+    msg.appendEntriesReq.prevLogIndex = prev_log_idx
+    msg.appendEntriesReq.prevLogTerm = log[prev_log_idx][1]
     return msg
+
 
   def send_heartbeats(self):
     with self.lock:
       for i in self.id_to_sock:
-        msg = self.heartbeat_rpc(i, self.current_term, self.commit_index, self.log)
+        msg = self.append_entries_rpc(i, self.current_term, self.commit_index, self.log, True)
         self.send(msg, self.id_to_sock[i])
     self.heartbeat_timer = threading.Timer(self.leader_timeout/1000, self.send_heartbeats)
     self.heartbeat_timer.daemon = True
@@ -264,11 +296,11 @@ class Server():
     msg.appendEntriesRes.id = self.server_id
     msg.appendEntriesRes.leaderTerm = append_entries_req.leaderTerm
 
-    self.lock.acquire()
+    self.application_thr_cv.acquire()
 
     if append_entries_req.leaderTerm < self.current_term:
         msg.appendEntriesRes.term = self.current_term
-        self.lock.release()
+        self.application_thr_cv.release()
         msg.appendEntriesRes.success = False
         self.send(msg, sock)
         return
@@ -279,7 +311,7 @@ class Server():
         self.leader = append_entries_req.leaderId
         # vacuously true if leader has no entries
         if append_entries_req.prevLogIndex == constant.EMPTY_LOG_LAST_LOG_INDEX and len(append_entries_req.entries) == 0:
-          self.lock.release()
+          self.application_thr_cv.release()
           msg.appendEntriesRes.success = True
           msg.appendEntriesRes.term = append_entries_req.leaderTerm
           msg.appendEntriesRes.lastLogIndex = constant.EMPTY_LOG_LAST_LOG_INDEX
@@ -287,7 +319,7 @@ class Server():
           self.reset_election_timer()
           return
         if append_entries_req.prevLogIndex not in self.log or self.log[append_entries_req.prevLogIndex][1] != append_entries_req.prevLogTerm:
-          self.lock.release()
+          self.application_thr_cv.release()
           msg.appendEntriesRes.success = False
           msg.appendEntriesRes.term = append_entries_req.leaderTerm
           self.send(msg, sock)
@@ -303,11 +335,24 @@ class Server():
             self.log[idx] = entry
             last_new_idx = idx
         if append_entries_req.leaderCommit > self.commit_index:
+
           self.commit_index = min(append_entries_req.leaderCommit, last_new_idx)
-          self.apply_committed()
+          N = self.last_log_index(self.log)
+          while N > self.commit_index:
+            if self.log[N][1] == self.current_term:
+              matches = 0
+              for m in self.match_index:
+                if m >= N:
+                  matches += 1
+              if matches >= int(self.n/2) + 1:
+                self.commit_index = N
+                break
+            N -= 1
+          # TODO HOW TO ACQUIRE LOCK AND APPLY LASTLOGINDEX ...
+          self.application_thr_cv.notify()
+          self.application_thr_cv.release()
         self.reset_election_timer()
         msg.appendEntriesRes.lastLogIndex = self.last_log_index(self.log)
-        self.lock.release()
         msg.appendEntriesRes.success = True
         msg.appendEntriesRes.term = append_entries_req.leaderTerm
         self.send(msg, sock)
@@ -321,14 +366,62 @@ class Server():
             return
         if append_entries_res.leaderTerm != self.current_term:
             return
-        follower = append_entries_res.id
         if append_entries_res.success:
-          # TODO update follower nextIndex and matchIndex
-          # must use append_entries_res.lastLogIndex
-          # TODO apply potentially
+          self.next_index[append_entries_res.id] = append_entries_res.lastLogIndex + 1
+          self.match_index[append_entries_res.id] = append_entries_res.lastLogIndex
+          if self.last_log_index(self.log)>= self.next_index[append_entries_res.id]:
+            msg = self.append_entries_rpc(append_entries_res.id, self.current_term, self.commit_index, self.log, False, self.next_index[append_entries_res.id])
+            self.send(msg, self.id_to_sock[append_entries_res.id])
+          
+          N = self.last_log_index(self.log)
+          while N > self.commit_index:
+            if self.log[N][1] == self.current_term:
+              matches = 0
+              for m in self.match_index:
+                if m >= N:
+                  matches += 1
+              if matches >= int(self.n/2) + 1:
+                self.commit_index = N
+                break
+            N -= 1
+          self.application_thr_cv.notify()
           return
-        next_index[follower] -= 1
-        # TODO construct AE RPC
+        next_index[append_entries_res.id] -= 1
+        msg = self.append_entries_rpc(append_entries_res.id, self.current_term, self.commit_index, self.log, False, self.next_index[append_entries_res.id])
+        self.send(msg, self.id_to_sock[append_entries_res.id])
+
+  def handle_client_request(self, client_req, sock):
+    with self.lock:
+      if self.server_id != self.leader:
+        msg = kv.RaftResponse()
+        msg.type = kv.RaftResponse.REDIRECT
+        msg.serialNo = client_req.serialNo
+        msg.originalRequest = client_req.request
+        self.send(msg, sock)
+        return
+
+      # if leader
+
+      if client_req.serialNo in processed_serial_nos:
+        self.send(processed_serial_nos[client_req.serialNo], sock)
+      if client_req.action == kv.Action.GET:
+        idx = self.last_log_index(self.log) + 1
+        self.client_requests[idx] = client_req
+        self.log[idx] = (client_req.cmd, self.current_term)
+        for i in self.id_to_sock:
+          msg = self.append_entries_rpc(i, self.current_term, self.commit_index, self.log, False, self.next_index[i])
+          self.send(msg, self.id_to_sock[i])
+        self.reset_heartbeat_timer()
+      elif client_req.action == kv.Action.PUT:
+        idx = self.last_log_index(self.log) + 1
+        self.client_requests[idx] = client_req
+        self.log[idx] = (client_req.cmd, self.current_term)
+        for i in self.id_to_sock:
+          msg = self.append_entries_rpc(i, self.current_term, self.commit_index, self.log, False, self.next_index[i])
+          self.send(msg, self.id_to_sock[i])
+        self.reset_heartbeat_timer()
+
+
 
   def last_log_index(self, log):
     return constant.EMPTY_LOG_LAST_LOG_INDEX if len(log) == 0 else max(log)
@@ -359,7 +452,28 @@ class Server():
     print(self.server_id, 'got handshake res from', handshake_res.id)
 
   def apply_committed(self):
-    pass
+    while True:
+      self.application_thr_cv.acquire()      
+      while self.last_applied == self.commit_index:
+        self.application_thr_cv.wait()
+      last_applied = self.last_applied
+      if self.role == 'leader':
+
+        for l in range(last_applied + 1, self.commit_index+1):
+          client_request = self.client_requests[l]
+          msg = kv.RaftResponse()
+          msg.type = kv.RaftResponse.KV_RES
+          msg.result.serialNo = client_request.request.serialNo
+          msg.result.action = client_request.request.action
+          if msg.result.action == kv.Action.GET:
+            state = [x+'='+self.state[x] for x in self.state]
+            msg.result.state.extend(state)
+          self.send(msg, self.client_csock)
+      for l in range(last_applied + 1, self.commit_index+1):
+        self.exec_command(self.log[l][0])
+        del client_requests[l]
+        self.last_applied += 1
+      self.application_thr_cv.release()  
 
   def accept_wrapper(self, sock):
     """
@@ -409,9 +523,12 @@ class Server():
             # determine the requester
             from_client = (sock == self.client_csock)
             if from_client is True:
-              cmd = payload.split()[0] 
-              if cmd == 'crash':
+              msg = kv.RaftRequest()
+              text_format.Parse(payload, msg)
+              if msg.type == kv.RaftRequest.CRASH:
                 self.crash()
+              elif msg.type == kv.RaftRequest.KV_REQ:
+                self.handle_client_request(msg.request, sock)
             else:
               msg = rpc.Rpc()
               text_format.Parse(payload, msg)
