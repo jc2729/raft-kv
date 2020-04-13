@@ -39,20 +39,21 @@ class ClientHandler(Thread):
         self.process = process
 
     def handle_payload(self, payload):
-        msg = kv.KVResponse()
+        msg = kv.RaftResponse()
         text_format.Parse(payload, msg)
         global leader, pending_rpcs, server_outq, lock
-        if msg.type == kv.KVResponse.REDIRECT:
+        if msg.type == kv.RaftResponse.REDIRECT:
             with lock:
                 leader = msg.redirect.leaderId
                 pending_rpcs[msg.originalRequest.serialNo][2].cancel()
             server_outq.put(msg.redirect.leaderId, text_format.MessageToString(msg.redirect.originalRequest))
-        elif msg.type == kv.KVResponse.KV_RES:
+        elif msg.type == kv.RaftResponse.KV_RES:
             with lock:
-                (_, leader, thr)= pending_rpcs[msg.serialNo]
-                del pending_rpcs[msg.serialNo]
+                (_, leader, thr)= pending_rpcs[msg.result.serialNo]
+                del pending_rpcs[msg.result.serialNo]
             thr.cancel()
-            print(msg)
+            if msg.result.action == kv.Action.GET:
+                print('***requested state below***\n', msg.result.state)
 
     def run(self):
         global threads
@@ -62,7 +63,7 @@ class ClientHandler(Thread):
                     split_buf = self.buffer.split('*', 1)
                     self.handle_payload(split_buf[0])
                     self.buffer = split_buf[1] if len(split_buf) == 2 else ''
-                data = str(self.sock.recv(1024))
+                data = self.sock.recv(1024).decode('utf-8')
                 self.buffer += data
             except Exception:
                 print (traceback.format_exc())
@@ -148,7 +149,7 @@ def retry_requests():
 
 def main(debug=False):
     global leader, threads, awaiting_res, lock, serial_no, pending_rpcs, leader_timeout
-    timeout_thread = Thread(target=timeout, args=())
+    timeout_thread = Thread(target=timeout, args=[])
     timeout_thread.setDaemon(True)
     timeout_thread.start()
 
@@ -198,7 +199,7 @@ def main(debug=False):
             with lock:
                 predicted_leader = leader
                 msg.request.serialNo = serial_no 
-                leader_timeout_thr = Timer(leader_timeout/1000, retry_random, args=(serial_no))
+                leader_timeout_thr = Timer(leader_timeout/1000, retry_random, args=[serial_no])
                 leader_timeout_thr.start()
                 pending_rpcs[serial_no] = (msg, leader, leader_timeout_thr)
                 serial_no += 1
@@ -212,8 +213,8 @@ def main(debug=False):
             with lock:
                 predicted_leader = leader
                 msg.request.serialNo = serial_no 
-                msg.request.entries.extend([server_cmd[2]+'='+server_cmd[3]])
-                leader_timeout_thr = Timer(leader_timeout/1000, retry_random, args=(serial_no))
+                msg.request.cmd = server_cmd[2]+'='+server_cmd[3]
+                leader_timeout_thr = Timer(leader_timeout/1000, retry_random, args=[serial_no])
                 leader_timeout_thr.start()
                 pending_rpcs[serial_no] = (msg, leader, leader_timeout_thr)
                 serial_no += 1

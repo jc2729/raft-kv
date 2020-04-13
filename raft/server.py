@@ -129,10 +129,10 @@ class Server():
     self.vote_count = 0
 
   def exec_command(self, cmd: str):
-    if 'get' in cmd:
+    if len(cmd) == 0:
       return
     var_val = cmd.split('=') 
-    self.store[var_val[0]]=[var_val[1]]
+    self.state[var_val[0]]=var_val[1]
 
   def crash(self):
     """
@@ -231,7 +231,7 @@ class Server():
     self.send(msg, sock)
 
   def handle_vote_res(self, vote_res, sock):
-    print(self.server_id, 'got vote res')
+    # print(self.server_id, 'got vote res')
     self.lock.acquire()
     if vote_res.term > self.current_term:
         self.current_term = vote_res.term
@@ -242,7 +242,7 @@ class Server():
         self.lock.release()
         return
     self.vote_count += 1
-    print(self.server_id, 'vote count', self.vote_count)
+    # print(self.server_id, 'vote count', self.vote_count)
     if self.role != 'leader' and self.vote_count >= int(self.n/2 + 1):
         # convert to leader
         self.role = 'leader'
@@ -260,7 +260,7 @@ class Server():
         self.heartbeat_timer = threading.Timer(self.leader_timeout/1000, self.send_heartbeats)
         self.heartbeat_timer.daemon = True
         self.heartbeat_timer.start()
-        print(self.server_id, 'became leader')
+        # print(self.server_id, 'became leader')
     self.lock.release()
         
   def append_entries_rpc(self, receiver, current_term, commit_index, log, is_heartbeat, receiver_next_index=-1):
@@ -274,10 +274,15 @@ class Server():
       msg.appendEntriesReq.prevLogIndex = last_log_idx
       msg.appendEntriesReq.prevLogTerm = constant.EMPTY_LOG_LAST_LOG_TERM if last_log_idx == constant.EMPTY_LOG_LAST_LOG_INDEX else log[last_log_idx][1]
       return msg
-    msg.appendEntriesReq.entries.extend([rpc.LogEntry(command, term) for k in log if k >= receiver_next_index ])
+    for k in sorted(log):
+      if k >= receiver_next_index:
+        l = rpc.LogEntry()
+        l.command = log[k][0]
+        l.term = log[k][1]
+        msg.appendEntriesReq.entries.extend([l])
     prev_log_idx = receiver_next_index - 1
     msg.appendEntriesReq.prevLogIndex = prev_log_idx
-    msg.appendEntriesReq.prevLogTerm = log[prev_log_idx][1]
+    msg.appendEntriesReq.prevLogTerm = 0 if prev_log_idx not in log else log[prev_log_idx][1] # dummy value
     return msg
 
 
@@ -318,43 +323,35 @@ class Server():
           self.send(msg, sock)
           self.reset_election_timer()
           return
-        if append_entries_req.prevLogIndex not in self.log or self.log[append_entries_req.prevLogIndex][1] != append_entries_req.prevLogTerm:
+        if append_entries_req.prevLogIndex != constant.EMPTY_LOG_LAST_LOG_INDEX and (append_entries_req.prevLogIndex not in self.log or self.log[append_entries_req.prevLogIndex][1] != append_entries_req.prevLogTerm):
           self.application_thr_cv.release()
           msg.appendEntriesRes.success = False
           msg.appendEntriesRes.term = append_entries_req.leaderTerm
           self.send(msg, sock)
           self.reset_election_timer()
           return
+        idx = append_entries_req.prevLogIndex + 1
         last_new_idx = self.commit_index
-        for (idx, entry) in sorted(append_entries_req.entries):
+        for e in append_entries_req.entries:
           if idx not in self.log:
-            self.log[idx] = entry
+            self.log[idx] = (e.command, e.term)
             last_new_idx = idx
-          elif idx in self.log and entry.term != self.log[idx][1]:
+          elif idx in self.log and e.term != self.log[idx][1]:
             self.log = {l:self.log[l] for l in self.log if l < idx}
-            self.log[idx] = entry
+            self.log[idx] = (e.command, e.term)
             last_new_idx = idx
+          idx += 1
         if append_entries_req.leaderCommit > self.commit_index:
 
           self.commit_index = min(append_entries_req.leaderCommit, last_new_idx)
           N = self.last_log_index(self.log)
-          while N > self.commit_index:
-            if self.log[N][1] == self.current_term:
-              matches = 0
-              for m in self.match_index:
-                if m >= N:
-                  matches += 1
-              if matches >= int(self.n/2) + 1:
-                self.commit_index = N
-                break
-            N -= 1
-          # TODO HOW TO ACQUIRE LOCK AND APPLY LASTLOGINDEX ...
           self.application_thr_cv.notify()
           self.application_thr_cv.release()
         self.reset_election_timer()
         msg.appendEntriesRes.lastLogIndex = self.last_log_index(self.log)
         msg.appendEntriesRes.success = True
         msg.appendEntriesRes.term = append_entries_req.leaderTerm
+        print(self.server_id, ' log ' ,self.log)
         self.send(msg, sock)
         
             
@@ -378,7 +375,7 @@ class Server():
             if self.log[N][1] == self.current_term:
               matches = 0
               for m in self.match_index:
-                if m >= N:
+                if self.match_index[m] >= N:
                   matches += 1
               if matches >= int(self.n/2) + 1:
                 self.commit_index = N
@@ -402,8 +399,8 @@ class Server():
 
       # if leader
 
-      if client_req.serialNo in processed_serial_nos:
-        self.send(processed_serial_nos[client_req.serialNo], sock)
+      # if client_req.serialNo in processed_serial_nos:
+      #   self.send(processed_serial_nos[client_req.serialNo], sock)
       if client_req.action == kv.Action.GET:
         idx = self.last_log_index(self.log) + 1
         self.client_requests[idx] = client_req
@@ -416,10 +413,12 @@ class Server():
         idx = self.last_log_index(self.log) + 1
         self.client_requests[idx] = client_req
         self.log[idx] = (client_req.cmd, self.current_term)
+        print(self.log)
         for i in self.id_to_sock:
           msg = self.append_entries_rpc(i, self.current_term, self.commit_index, self.log, False, self.next_index[i])
           self.send(msg, self.id_to_sock[i])
         self.reset_heartbeat_timer()
+      self.match_index[self.server_id] = idx
 
 
 
@@ -441,7 +440,6 @@ class Server():
   
   def handle_handshake_req(self, handshake_req, sock):
     self.id_to_sock[handshake_req.id] = sock
-    print(self.server_id, 'got handshake req from', handshake_req.id)
     msg = rpc.Rpc()
     msg.type = rpc.Rpc.REQUEST_HANDSHAKE_RES
     msg.handshakeRes.id = self.server_id
@@ -449,7 +447,6 @@ class Server():
 
   def handle_handshake_res(self, handshake_res, sock):
     self.id_to_sock[handshake_res.id] = sock
-    print(self.server_id, 'got handshake res from', handshake_res.id)
 
   def apply_committed(self):
     while True:
@@ -457,23 +454,23 @@ class Server():
       while self.last_applied == self.commit_index:
         self.application_thr_cv.wait()
       last_applied = self.last_applied
-      if self.role == 'leader':
-
-        for l in range(last_applied + 1, self.commit_index+1):
+          
+      for l in range(last_applied + 1, self.commit_index+1):
+        self.exec_command(self.log[l][0])
+        if self.role == 'leader':
           client_request = self.client_requests[l]
           msg = kv.RaftResponse()
           msg.type = kv.RaftResponse.KV_RES
-          msg.result.serialNo = client_request.request.serialNo
-          msg.result.action = client_request.request.action
+          msg.result.serialNo = client_request.serialNo
+          msg.result.action = client_request.action
           if msg.result.action == kv.Action.GET:
             state = [x+'='+self.state[x] for x in self.state]
             msg.result.state.extend(state)
           self.send(msg, self.client_csock)
-      for l in range(last_applied + 1, self.commit_index+1):
-        self.exec_command(self.log[l][0])
-        del client_requests[l]
+          del self.client_requests[l]
         self.last_applied += 1
-      self.application_thr_cv.release()  
+      self.application_thr_cv.release()
+
 
   def accept_wrapper(self, sock):
     """

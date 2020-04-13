@@ -13,7 +13,7 @@ message RaftRequest {
 message KVRequest {
 	required int32 serialNo = 1;
 	required Action action = 2; // 'get as in get all', 'put'
-	repeated string cmd = 3;
+	optional string cmd = 3;
 }
 
 message RaftResponse {
