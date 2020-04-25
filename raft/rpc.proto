@@ -61,5 +61,6 @@ message Rpc {
 message LogEntry {
 	required string command = 1;
 	required int32 term = 2; // term when entry was received by leader
+	required int32 serialNo = 3;
 }
 

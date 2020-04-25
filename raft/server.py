@@ -2,6 +2,7 @@
 
 import argparse
 import constant
+import log
 import logging
 import random
 import rpc_pb2 as rpc
@@ -92,7 +93,7 @@ class Server():
     # raft-specific persistent state on ALL servers
     self.current_term = 0
     self.voted_for = None # reset always when current term changes
-    self.log = {} # log[index] = (cmd, term)
+    self.log = {} # log[index] = (cmd, term, serial_no) where cmd one of: "PUT key val", "GET key", or "APPEND key val"
 
     # volatile state on ALL servers
     self.commit_index = 0
@@ -129,10 +130,13 @@ class Server():
     self.vote_count = 0
 
   def exec_command(self, cmd: str):
-    if len(cmd) == 0:
+    if cmd.startswith('GET'):
       return
-    var_val = cmd.split('=') 
-    self.state[var_val[0]]=var_val[1]
+    var_val = cmd.split(' ') 
+    if var_val[0] == 'PUT':
+      self.state[var_val[1]]=var_val[2]
+    elif var_val[0] == 'APPEND':
+      self.state[var_val[1]] = self.state[var_val[1]] + var_val[2] if var_val[1] in self.state else var_val[2]
 
   def crash(self):
     """
@@ -279,6 +283,7 @@ class Server():
         l = rpc.LogEntry()
         l.command = log[k][0]
         l.term = log[k][1]
+        l.serialNo = log[k][2]
         msg.appendEntriesReq.entries.extend([l])
     prev_log_idx = receiver_next_index - 1
     msg.appendEntriesReq.prevLogIndex = prev_log_idx
@@ -334,11 +339,11 @@ class Server():
         last_new_idx = self.commit_index
         for e in append_entries_req.entries:
           if idx not in self.log:
-            self.log[idx] = (e.command, e.term)
+            self.log[idx] = (e.command, e.term, e.serialNo)
             last_new_idx = idx
           elif idx in self.log and e.term != self.log[idx][1]:
             self.log = {l:self.log[l] for l in self.log if l < idx}
-            self.log[idx] = (e.command, e.term)
+            self.log[idx] = (e.command, e.term, e.serialNo)
             last_new_idx = idx
           idx += 1
         if append_entries_req.leaderCommit > self.commit_index:
@@ -392,32 +397,33 @@ class Server():
       if self.server_id != self.leader:
         msg = kv.RaftResponse()
         msg.type = kv.RaftResponse.REDIRECT
-        msg.serialNo = client_req.serialNo
-        msg.originalRequest = client_req.request
+        msg.redirect.leaderId = self.leader
+        msg.redirect.originalRequest.serialNo = client_req.serialNo
+        msg.redirect.originalRequest.action = client_req.action
+        msg.redirect.originalRequest.cmd = client_req.cmd
         self.send(msg, sock)
         return
 
-      # if leader
-
-      # if client_req.serialNo in processed_serial_nos:
-      #   self.send(processed_serial_nos[client_req.serialNo], sock)
-      if client_req.action == kv.Action.GET:
-        idx = self.last_log_index(self.log) + 1
-        self.client_requests[idx] = client_req
-        self.log[idx] = (client_req.cmd, self.current_term)
-        for i in self.id_to_sock:
-          msg = self.append_entries_rpc(i, self.current_term, self.commit_index, self.log, False, self.next_index[i])
-          self.send(msg, self.id_to_sock[i])
-        self.reset_heartbeat_timer()
-      elif client_req.action == kv.Action.PUT:
-        idx = self.last_log_index(self.log) + 1
-        self.client_requests[idx] = client_req
-        self.log[idx] = (client_req.cmd, self.current_term)
-        print(self.log)
-        for i in self.id_to_sock:
-          msg = self.append_entries_rpc(i, self.current_term, self.commit_index, self.log, False, self.next_index[i])
-          self.send(msg, self.id_to_sock[i])
-        self.reset_heartbeat_timer()
+      if client_req.serialNo in self.processed_serial_nos:
+        self.send(self.processed_serial_nos[client_req.serialNo], sock)
+        return
+      # if client_req.action == kv.Action.GET:
+      #   idx = self.last_log_index(self.log) + 1
+      #   self.client_requests[idx] = client_req
+      #   self.log[idx] = (client_req.cmd, self.current_term, client_req.serialNo)
+      #   for i in self.id_to_sock:
+      #     msg = self.append_entries_rpc(i, self.current_term, self.commit_index, self.log, False, self.next_index[i])
+      #     self.send(msg, self.id_to_sock[i])
+      #   self.reset_heartbeat_timer()
+      # elif client_req.action == kv.Action.PUT:
+      idx = self.last_log_index(self.log) + 1
+      self.client_requests[idx] = client_req
+      self.log[idx] = (client_req.cmd, self.current_term, client_req.serialNo)
+      print(self.log)
+      for i in self.id_to_sock:
+        msg = self.append_entries_rpc(i, self.current_term, self.commit_index, self.log, False, self.next_index[i])
+        self.send(msg, self.id_to_sock[i])
+      self.reset_heartbeat_timer()
       self.match_index[self.server_id] = idx
 
 
@@ -457,20 +463,36 @@ class Server():
           
       for l in range(last_applied + 1, self.commit_index+1):
         self.exec_command(self.log[l][0])
-        if self.role == 'leader':
-          client_request = self.client_requests[l]
-          msg = kv.RaftResponse()
-          msg.type = kv.RaftResponse.KV_RES
-          msg.result.serialNo = client_request.serialNo
-          msg.result.action = client_request.action
-          if msg.result.action == kv.Action.GET:
-            state = [x+'='+self.state[x] for x in self.state]
+
+        serial_no = self.log[l][2]
+        msg = kv.RaftResponse()
+        msg.type = kv.RaftResponse.KV_RES
+        msg.result.serialNo = serial_no
+        action_var_val = self.log[l][0].split(' ')
+        msg.result.action = self.kv_action(action_var_val[0])
+        if msg.result.action == kv.Action.GET:
+            state = [action_var_val[1]+'='+(self.state[action_var_val[1]] if action_var_val[1] in self.state else "")]
             msg.result.state.extend(state)
+        self.processed_serial_nos = {} # assume 1 client
+        self.processed_serial_nos[serial_no] = msg
+
+        if self.role == 'leader':
+          # client_request = self.client_requests[l]
+          # msg = kv.RaftResponse()
+          # msg.type = kv.RaftResponse.KV_RES
+          # msg.result.serialNo = client_request.serialNo
+          # msg.result.action = client_request.action
+          # if msg.result.action == kv.Action.GET:
+          #   state = [x+'='+self.state[x] for x in self.state]
+          #   msg.result.state.extend(state)
           self.send(msg, self.client_csock)
           del self.client_requests[l]
+
         self.last_applied += 1
       self.application_thr_cv.release()
 
+  def kv_action(self,action):
+    return {"PUT":kv.Action.PUT, "GET":kv.Action.GET, "APPEND":kv.Action.APPEND}[action]
 
   def accept_wrapper(self, sock):
     """

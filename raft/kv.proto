@@ -39,4 +39,5 @@ message RaftResponse {
 enum Action {
 	GET = 0;
 	PUT = 1;
+	APPEND = 2;
 }
