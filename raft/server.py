@@ -407,15 +407,6 @@ class Server():
       if client_req.serialNo in self.processed_serial_nos:
         self.send(self.processed_serial_nos[client_req.serialNo], sock)
         return
-      # if client_req.action == kv.Action.GET:
-      #   idx = self.last_log_index(self.log) + 1
-      #   self.client_requests[idx] = client_req
-      #   self.log[idx] = (client_req.cmd, self.current_term, client_req.serialNo)
-      #   for i in self.id_to_sock:
-      #     msg = self.append_entries_rpc(i, self.current_term, self.commit_index, self.log, False, self.next_index[i])
-      #     self.send(msg, self.id_to_sock[i])
-      #   self.reset_heartbeat_timer()
-      # elif client_req.action == kv.Action.PUT:
       idx = self.last_log_index(self.log) + 1
       self.client_requests[idx] = client_req
       self.log[idx] = (client_req.cmd, self.current_term, client_req.serialNo)
@@ -477,14 +468,6 @@ class Server():
         self.processed_serial_nos[serial_no] = msg
 
         if self.role == 'leader':
-          # client_request = self.client_requests[l]
-          # msg = kv.RaftResponse()
-          # msg.type = kv.RaftResponse.KV_RES
-          # msg.result.serialNo = client_request.serialNo
-          # msg.result.action = client_request.action
-          # if msg.result.action == kv.Action.GET:
-          #   state = [x+'='+self.state[x] for x in self.state]
-          #   msg.result.state.extend(state)
           self.send(msg, self.client_csock)
           del self.client_requests[l]
 
