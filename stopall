@@ -1,4 +1,4 @@
 #!/bin/bash
 
 ps aux | grep server.py | awk '{print $2}' | xargs kill
-rm *.log
+rm *.pkl
