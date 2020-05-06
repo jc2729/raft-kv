@@ -89,7 +89,7 @@ class Server():
     self.server_lsock.setblocking(False)
     self.sel.register(self.server_lsock, selectors.EVENT_READ, data=None)
 
-    self.lock = threading.RLock()
+    self.lock = threading.Lock()
 
     # raft-specific persistent state on ALL servers
     self.STORAGE = '{}.pkl'.format(self.server_id)
@@ -127,7 +127,6 @@ class Server():
     # volatile state ONLY for leaders, None otherwise
     self.match_index = None
     self.next_index = None
-    self.client_requests = {}
     # self.rpc_no = 0
     # array of queues for retrying indefinitely for servers that have failed
     # self.pending_rpcs = None # {receiver: {msg no: msg} }
@@ -173,6 +172,7 @@ class Server():
     '''
     precond: has lock
     '''
+    print(self.server_id, ' converted to follower')
     role = 'leader'
     self.role = 'follower'
     if role == 'leader':
@@ -189,7 +189,8 @@ class Server():
     print(self.server_id, 'became candidate')
     msg = rpc.Rpc()
     msg.type = rpc.Rpc.REQUEST_VOTE
-    with self.lock:
+    self.lock.acquire()
+    try:
         self.role = 'candidate'
         self.leader = None
         self.persistent_state['current_term'] += 1
@@ -200,8 +201,12 @@ class Server():
         self.persistent_state['voted_for'] = self.server_id
         self.vote_count = 1
         self.reset_election_timer()
+        print('starting to send vote reqs')
+    finally:
+        self.lock.release()
     for i in self.id_to_sock:
         self.send(msg, self.id_to_sock[i])
+    print('finished sending vote reqs')
     
   def save_to_storage(self):
     with open(self.STORAGE, 'wb') as f:
@@ -239,65 +244,67 @@ class Server():
     msg.voteRes.candidateTerm = vote_req.candidateTerm
 
     self.lock.acquire()
-    if vote_req.candidateTerm < self.persistent_state['current_term']:
-        msg.voteRes.voteGranted = False
-        msg.voteRes.term = self.persistent_state['current_term']
-        self.lock.release()
-    else:
-        if self.persistent_state['current_term'] < vote_req.candidateTerm:
-            self.convert_to_follower()
-            self.persistent_state['current_term'] = vote_req.candidateTerm
-            self.persistent_state['voted_for'] = None
-            msg.voteRes.term = self.persistent_state['current_term']
-        last_log_idx = self.last_log_index(self.persistent_state['log'])
-        last_log_term = constant.EMPTY_LOG_LAST_LOG_TERM if last_log_idx == constant.EMPTY_LOG_LAST_LOG_INDEX else self.persistent_state['log'][last_log_idx][1]
-        if (self.persistent_state['voted_for'] is None or self.persistent_state['voted_for'] == vote_req.candidateId) and self.log_comparison(vote_req.lastLogIndex, vote_req.lastLogTerm, last_log_idx, last_log_term) >= 0:
-            msg.voteRes.voteGranted = True
-            self.persistent_state['voted_for'] = vote_req.candidateId
-            msg.voteRes.term = self.persistent_state['current_term']
-            self.reset_election_timer() # only reset if vote is granted
-            self.lock.release()
-        else:
-            msg.voteRes.term = self.persistent_state['current_term']
-            self.lock.release()
-            msg.voteRes.voteGranted = False
+    try:
+      if vote_req.candidateTerm < self.persistent_state['current_term']:
+          msg.voteRes.voteGranted = False
+          msg.voteRes.term = self.persistent_state['current_term']
+          
+      else:
+          if self.persistent_state['current_term'] < vote_req.candidateTerm:
+              self.convert_to_follower()
+              self.persistent_state['current_term'] = vote_req.candidateTerm
+              self.persistent_state['voted_for'] = None
+              msg.voteRes.term = self.persistent_state['current_term']
+          last_log_idx = self.last_log_index(self.persistent_state['log'])
+          last_log_term = constant.EMPTY_LOG_LAST_LOG_TERM if last_log_idx == constant.EMPTY_LOG_LAST_LOG_INDEX else self.persistent_state['log'][last_log_idx][1]
+          if (self.persistent_state['voted_for'] is None or self.persistent_state['voted_for'] == vote_req.candidateId) and self.log_comparison(vote_req.lastLogIndex, vote_req.lastLogTerm, last_log_idx, last_log_term) >= 0:
+              msg.voteRes.voteGranted = True
+              self.persistent_state['voted_for'] = vote_req.candidateId
+              msg.voteRes.term = self.persistent_state['current_term']
+              self.reset_election_timer() # only reset if vote is granted
+          else:
+              msg.voteRes.term = self.persistent_state['current_term']
+              msg.voteRes.voteGranted = False
+    finally:
+      self.lock.release()
     self.save_to_storage()
     self.send(msg, sock)
 
   def handle_vote_res(self, vote_res, sock):
     # print(self.server_id, 'got vote res')
     self.lock.acquire()
-    if vote_res.term > self.persistent_state['current_term']:
-        self.persistent_state['current_term'] = vote_res.term
-        self.convert_to_follower()
-        self.lock.release()
-        return
-    if vote_res.candidateTerm != self.persistent_state['current_term']:
-        self.lock.release()
-        return
-    self.vote_count += 1
-    # print(self.server_id, 'vote count', self.vote_count)
-    if self.role != 'leader' and self.vote_count >= int(self.n/2 + 1):
-        # convert to leader
-        self.role = 'leader'
-        # self.pending_rpcs = {}
-        self.leader = self.server_id
-        # establish self as leader
-        self.election_timer.cancel()
-        next_index = self.last_log_index(self.persistent_state['log']) + 1
-        self.next_index = {server:next_index for server in range(self.n)}
-        self.match_index = {server:0 for server in range(self.n)}
-        self.client_rpcs = {}
-        self.save_to_storage()
-        for i in self.id_to_sock:
-            msg = self.append_entries_rpc(i, self.persistent_state['current_term'], self.commit_index, self.persistent_state['log'], True)
-            # self.track_and_send(msg, self.id_to_sock[i])
-            self.send(msg, self.id_to_sock[i])
-        self.heartbeat_timer = threading.Timer(self.leader_timeout/1000, self.send_heartbeats)
-        self.heartbeat_timer.daemon = True
-        self.heartbeat_timer.start()
-        # print(self.server_id, 'became leader')
-    self.lock.release()
+    try:
+      if vote_res.term > self.persistent_state['current_term']:
+          self.persistent_state['current_term'] = vote_res.term
+          self.convert_to_follower()
+          return
+      if vote_res.candidateTerm != self.persistent_state['current_term']:
+          return
+      self.vote_count += 1
+      # print(self.server_id, 'vote count', self.vote_count)
+      if self.role != 'leader' and self.vote_count >= int(self.n/2 + 1):
+          # convert to leader
+          self.role = 'leader'
+          # self.pending_rpcs = {}
+          print(self.server_id, ' became leader')
+          self.leader = self.server_id
+          # establish self as leader
+          self.election_timer.cancel()
+          next_index = self.last_log_index(self.persistent_state['log']) + 1
+          self.next_index = {server:next_index for server in range(self.n)}
+          self.match_index = {server:0 for server in range(self.n)}
+          self.client_rpcs = {}
+          self.save_to_storage()
+          for i in self.id_to_sock:
+              msg = self.append_entries_rpc(i, self.persistent_state['current_term'], self.commit_index, self.persistent_state['log'], True)
+              # self.track_and_send(msg, self.id_to_sock[i])
+              self.send(msg, self.id_to_sock[i])
+          self.heartbeat_timer = threading.Timer(self.leader_timeout/1000, self.send_heartbeats)
+          self.heartbeat_timer.daemon = True
+          self.heartbeat_timer.start()
+          # print(self.server_id, 'became leader')
+    finally:
+      self.lock.release()
         
   def append_entries_rpc(self, receiver, current_term, commit_index, log, is_heartbeat, receiver_next_index=-1):
     msg = rpc.Rpc()
@@ -340,107 +347,113 @@ class Server():
     msg.appendEntriesRes.leaderTerm = append_entries_req.leaderTerm
 
     self.application_thr_cv.acquire()
+    try:
+      if append_entries_req.leaderTerm < self.persistent_state['current_term']:
+          msg.appendEntriesRes.term = self.persistent_state['current_term']
+          msg.appendEntriesRes.success = False
+          self.save_to_storage()
+          self.send(msg, sock)
+          return
+      else:
+          if self.persistent_state['current_term'] < append_entries_req.leaderTerm:
+              self.convert_to_follower()
+          self.persistent_state['current_term'] = append_entries_req.leaderTerm
+          self.leader = append_entries_req.leaderId
+          print(self.server_id, '\'s leader is ', self.leader, ' at term ', self.persistent_state['current_term'])
+          # vacuously true if leader has no entries
+          if append_entries_req.prevLogIndex == constant.EMPTY_LOG_LAST_LOG_INDEX and len(append_entries_req.entries) == 0:
+            msg.appendEntriesRes.success = True
+            msg.appendEntriesRes.term = append_entries_req.leaderTerm
+            msg.appendEntriesRes.lastLogIndex = constant.EMPTY_LOG_LAST_LOG_INDEX
+            self.save_to_storage()
+            self.send(msg, sock)
+            self.reset_election_timer()
+            return
+          if append_entries_req.prevLogIndex != constant.EMPTY_LOG_LAST_LOG_INDEX and (append_entries_req.prevLogIndex not in self.persistent_state['log'] or self.persistent_state['log'][append_entries_req.prevLogIndex][1] != append_entries_req.prevLogTerm):
+            
+            msg.appendEntriesRes.success = False
+            msg.appendEntriesRes.term = append_entries_req.leaderTerm
+            self.save_to_storage()
+            self.send(msg, sock)
+            self.reset_election_timer()
+            return
+          idx = append_entries_req.prevLogIndex + 1
+          last_new_idx = self.commit_index
+          for e in append_entries_req.entries:
+            if idx not in self.persistent_state['log']:
+              self.persistent_state['log'][idx] = (e.command, e.term, e.serialNo)
+              last_new_idx = idx
+            elif idx in self.persistent_state['log'] and e.term != self.persistent_state['log'][idx][1]:
+              self.persistent_state['log'] = {l:self.persistent_state['log'][l] for l in self.persistent_state['log'] if l < idx}
+              self.persistent_state['log'][idx] = (e.command, e.term, e.serialNo)
+              last_new_idx = idx
+            idx += 1
+          if append_entries_req.leaderCommit > self.commit_index:
 
-    if append_entries_req.leaderTerm < self.persistent_state['current_term']:
-        msg.appendEntriesRes.term = self.persistent_state['current_term']
-        self.application_thr_cv.release()
-        msg.appendEntriesRes.success = False
-        self.save_to_storage()
-        self.send(msg, sock)
-        return
-    else:
-        if self.persistent_state['current_term'] < append_entries_req.leaderTerm:
-            self.convert_to_follower()
-        self.persistent_state['current_term'] = append_entries_req.leaderTerm
-        self.leader = append_entries_req.leaderId
-        # vacuously true if leader has no entries
-        if append_entries_req.prevLogIndex == constant.EMPTY_LOG_LAST_LOG_INDEX and len(append_entries_req.entries) == 0:
-          self.application_thr_cv.release()
+            self.commit_index = min(append_entries_req.leaderCommit, last_new_idx)
+            N = self.last_log_index(self.persistent_state['log'])
+            self.application_thr_cv.notify()
+            
+          self.reset_election_timer()
+          msg.appendEntriesRes.lastLogIndex = self.last_log_index(self.persistent_state['log'])
           msg.appendEntriesRes.success = True
           msg.appendEntriesRes.term = append_entries_req.leaderTerm
-          msg.appendEntriesRes.lastLogIndex = constant.EMPTY_LOG_LAST_LOG_INDEX
+          # print(self.server_id, ' log ' ,self.persistent_state['log'])
           self.save_to_storage()
           self.send(msg, sock)
-          self.reset_election_timer()
-          return
-        if append_entries_req.prevLogIndex != constant.EMPTY_LOG_LAST_LOG_INDEX and (append_entries_req.prevLogIndex not in self.persistent_state['log'] or self.persistent_state['log'][append_entries_req.prevLogIndex][1] != append_entries_req.prevLogTerm):
-          self.application_thr_cv.release()
-          msg.appendEntriesRes.success = False
-          msg.appendEntriesRes.term = append_entries_req.leaderTerm
-          self.save_to_storage()
-          self.send(msg, sock)
-          self.reset_election_timer()
-          return
-        idx = append_entries_req.prevLogIndex + 1
-        last_new_idx = self.commit_index
-        for e in append_entries_req.entries:
-          if idx not in self.persistent_state['log']:
-            self.persistent_state['log'][idx] = (e.command, e.term, e.serialNo)
-            last_new_idx = idx
-          elif idx in self.persistent_state['log'] and e.term != self.persistent_state['log'][idx][1]:
-            self.persistent_state['log'] = {l:self.persistent_state['log'][l] for l in self.persistent_state['log'] if l < idx}
-            self.persistent_state['log'][idx] = (e.command, e.term, e.serialNo)
-            last_new_idx = idx
-          idx += 1
-        if append_entries_req.leaderCommit > self.commit_index:
-
-          self.commit_index = min(append_entries_req.leaderCommit, last_new_idx)
-          N = self.last_log_index(self.persistent_state['log'])
-          self.application_thr_cv.notify()
-          self.application_thr_cv.release()
-        self.reset_election_timer()
-        msg.appendEntriesRes.lastLogIndex = self.last_log_index(self.persistent_state['log'])
-        msg.appendEntriesRes.success = True
-        msg.appendEntriesRes.term = append_entries_req.leaderTerm
-        print(self.server_id, ' log ' ,self.persistent_state['log'])
-        self.save_to_storage()
-        self.send(msg, sock)
+    finally:
+      self.application_thr_cv.release()
         
             
   def handle_append_entries_res(self, append_entries_res, sock):
-    with self.lock:
+    self.lock.acquire()
+    try:
         # receiver = self.sock_to_id(sock)
         # # duplicate, already handled
         # if rpc_no not in self.pending_rpcs[receiver]:
         #   return 
 
         # del self.pending_rpcs[receiver][rpc_no]
-        if append_entries_res.term > self.persistent_state['current_term']:
-            self.persistent_state['current_term'] = append_entries_res.term
-            self.convert_to_follower()
-            return
-        if append_entries_res.leaderTerm != self.persistent_state['current_term']:
-            return
-        if append_entries_res.success:
-          self.next_index[append_entries_res.id] = append_entries_res.lastLogIndex + 1
-          self.match_index[append_entries_res.id] = append_entries_res.lastLogIndex
-          if self.last_log_index(self.persistent_state['log'])>= self.next_index[append_entries_res.id]:
-            msg = self.append_entries_rpc(append_entries_res.id, self.persistent_state['current_term'], self.commit_index, self.persistent_state['log'], False, self.next_index[append_entries_res.id])
-            self.save_to_storage()
-            # self.track_and_send(msg, self.id_to_sock[append_entries_res.id])
-            self.send(msg, self.id_to_sock[append_entries_res.id])
-          
-          N = self.last_log_index(self.persistent_state['log'])
-          while N > self.commit_index:
-            if self.persistent_state['log'][N][1] == self.persistent_state['current_term']:
-              matches = 0
-              for m in self.match_index:
-                if self.match_index[m] >= N:
-                  matches += 1
-              if matches >= int(self.n/2) + 1:
-                self.commit_index = N
-                break
-            N -= 1
-          self.application_thr_cv.notify()
+      if append_entries_res.term > self.persistent_state['current_term']:
+          self.persistent_state['current_term'] = append_entries_res.term
+          self.convert_to_follower()
           return
-        next_index[append_entries_res.id] -= 1
-        msg = self.append_entries_rpc(append_entries_res.id, self.persistent_state['current_term'], self.commit_index, self.persistent_state['log'], False, self.next_index[append_entries_res.id])
-        self.save_to_storage()
-        # self.track_and_send(msg, self.id_to_sock[append_entries_res.id])
-        self.send(msg, self.id_to_sock[append_entries_res.id])
+      if append_entries_res.leaderTerm != self.persistent_state['current_term']:
+          return
+      if append_entries_res.success:
+        self.next_index[append_entries_res.id] = append_entries_res.lastLogIndex + 1
+        self.match_index[append_entries_res.id] = append_entries_res.lastLogIndex
+        if self.last_log_index(self.persistent_state['log'])>= self.next_index[append_entries_res.id]:
+          msg = self.append_entries_rpc(append_entries_res.id, self.persistent_state['current_term'], self.commit_index, self.persistent_state['log'], False, self.next_index[append_entries_res.id])
+          self.save_to_storage()
+          # self.track_and_send(msg, self.id_to_sock[append_entries_res.id])
+          self.send(msg, self.id_to_sock[append_entries_res.id])
+        
+        N = self.last_log_index(self.persistent_state['log'])
+        while N > self.commit_index:
+          if self.persistent_state['log'][N][1] == self.persistent_state['current_term']:
+            matches = 0
+            for m in self.match_index:
+              if self.match_index[m] >= N:
+                matches += 1
+            if matches >= int(self.n/2) + 1:
+              self.commit_index = N
+              break
+          N -= 1
+        self.application_thr_cv.notify()
+        return
+      self.next_index[append_entries_res.id] -= 1
+      msg = self.append_entries_rpc(append_entries_res.id, self.persistent_state['current_term'], self.commit_index, self.persistent_state['log'], False, self.next_index[append_entries_res.id])
+      self.save_to_storage()
+      # self.track_and_send(msg, self.id_to_sock[append_entries_res.id])
+      self.send(msg, self.id_to_sock[append_entries_res.id])
+    finally:
+      self.application_thr_cv.release()
 
   def handle_client_request(self, client_req, sock):
-    with self.lock:
+    self.lock.acquire()
+    try:
+      print(self.server_id, ' got ', client_req)
       if self.server_id != self.leader:
         msg = kv.RaftResponse()
         msg.type = kv.RaftResponse.REDIRECT
@@ -455,15 +468,16 @@ class Server():
         self.send(self.processed_serial_nos[client_req.serialNo], sock)
         return
       idx = self.last_log_index(self.persistent_state['log']) + 1
-      self.client_requests[idx] = client_req
       self.persistent_state['log'][idx] = (client_req.cmd, self.persistent_state['current_term'], client_req.serialNo)
-      print(self.persistent_state['log'])
+      # print(self.persistent_state['log'])
       for i in self.id_to_sock:
         msg = self.append_entries_rpc(i, self.persistent_state['current_term'], self.commit_index, self.persistent_state['log'], False, self.next_index[i])
         # self.track_and_send(msg, self.id_to_sock[i])
         self.send(msg, self.id_to_sock[i])
       self.reset_heartbeat_timer()
       self.match_index[self.server_id] = idx
+    finally:
+      self.application_thr_cv.release()
 
 
 
@@ -517,7 +531,6 @@ class Server():
 
         if self.role == 'leader':
           self.send(msg, self.client_csock)
-          del self.client_requests[l]
 
         self.last_applied += 1
       self.application_thr_cv.release()
@@ -560,7 +573,7 @@ class Server():
         recv_data = sock.recv(4096)  # Should be ready to read
         if recv_data:
           recv_buffer = recv_data.decode('utf-8')
-          print(self.server_id, 'got data: ', recv_buffer)
+          
           while len(recv_buffer) > 0:
             payload = recv_buffer
 
@@ -572,9 +585,11 @@ class Server():
 
             # determine the requester
             from_client = (sock == self.client_csock)
+
             if from_client is True:
               msg = kv.RaftRequest()
               text_format.Parse(payload, msg)
+              print(self.server_id, 'got data from client: ', msg)
               if msg.type == kv.RaftRequest.CRASH:
                 self.crash()
               elif msg.type == kv.RaftRequest.KV_REQ:
