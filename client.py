@@ -41,7 +41,7 @@ class ClientHandler(Thread):
     def handle_payload(self, payload):
         global awaiting_res, queued_rpcs, pending_rpcs, leader, lock
         awaiting_res = False
-        print('$$$$$$$ client payload', payload)
+        print('$$$$$$$$$$ client payload $$$$$$$$$$', payload)
         msg = kv.RaftResponse()
         text_format.Parse(payload, msg)
         lock.acquire()
@@ -81,13 +81,13 @@ class ClientHandler(Thread):
                 data = self.sock.recv(1024).decode('utf-8')
                 self.buffer += data
             except ConnectionError:
-                print (traceback.format_exc(), 'problem with', self.index)
+                print ('Client detected problem with', self.index)
                 self.valid = False
                 del threads[self.index]
                 self.sock.close()
                 break
             except Exception:
-                print (traceback.format_exc())
+                print ('Client detected problem with', self.index)
                 self.valid = False
                 del threads[self.index]
                 self.sock.close()
@@ -187,20 +187,14 @@ def try_requests():
         lock.release()
 
 def start(pid, address, port, n):
-    # if debug:
     process = subprocess.Popen(['./process', str(pid), n, str(port)], preexec_fn=os.setsid)
-    # else:
-    # process = subprocess.Popen(['./process', str(pid), n, str(port)], stdout=open('/dev/null', 'w'),
-    # stderr=open('/dev/null', 'w'), preexec_fn=os.setsid)
-
-    # sleep for a while to allow the process to set up
     time.sleep(3)
     handler = ClientHandler(pid, address, port, process)
     threads[pid] = handler
     handler.start()
     time.sleep(0.1)
 
-def main(debug=False):
+def main():
     global leader, threads, awaiting_res, lock, serial_no, pending_rpcs, leader_timeout
     timeout_thread = Thread(target=timeout, args=[])
     timeout_thread.setDaemon(True)
@@ -286,8 +280,4 @@ def main(debug=False):
 
 
 if __name__ == '__main__':
-    debug = False
-    if len(sys.argv) > 1 and sys.argv[1] == 'debug':
-        debug = True
-
-    main(debug)
+    main()

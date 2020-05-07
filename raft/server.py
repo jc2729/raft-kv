@@ -127,9 +127,6 @@ class Server():
     # volatile state ONLY for leaders, None otherwise
     self.match_index = None
     self.next_index = None
-    # self.rpc_no = 0
-    # array of queues for retrying indefinitely for servers that have failed
-    # self.pending_rpcs = None # {receiver: {msg no: msg} }
 
     # state for candidates
     self.vote_count = 0
@@ -148,14 +145,6 @@ class Server():
     Immediately crashes this server
     """
     sys.exit(0)
-
-  # def track_and_send(self, msg, sock, has_rpc_no = False):
-  #   # TODO how often to retry
-  #   if not has_rpc_no:
-  #     msg.no = self.rpc_no
-  #     self.rpc_no += 1
-  #     self.pending_rpcs[self.sock_to_id(sock)][msg.no] = msg
-  #   self.send(msg,sock)
 
   def sock_to_id(self,sock):
     for item in id_to_sock.items():
@@ -177,7 +166,6 @@ class Server():
     self.role = 'follower'
     if role == 'leader':
         self.leader = None
-        # self.pending_rpcs = None
         self.match_index = None
         self.next_index = None
         self.persistent_state['voted_for'] = None
@@ -282,7 +270,6 @@ class Server():
       if self.role != 'leader' and self.vote_count >= int(self.n/2 + 1):
           # convert to leader
           self.role = 'leader'
-          # self.pending_rpcs = {}
           print(self.server_id, ' became leader')
           self.leader = self.server_id
           # establish self as leader
@@ -294,7 +281,6 @@ class Server():
           self.save_to_storage()
           for i in self.id_to_sock:
               msg = self.append_entries_rpc(i, self.persistent_state['current_term'], self.commit_index, self.persistent_state['log'], True)
-              # self.track_and_send(msg, self.id_to_sock[i])
               self.send(msg, self.id_to_sock[i])
           self.heartbeat_timer = threading.Timer(self.leader_timeout/1000, self.send_heartbeats)
           self.heartbeat_timer.daemon = True
@@ -330,7 +316,6 @@ class Server():
     with self.lock:
       for i in self.id_to_sock:
         msg = self.append_entries_rpc(i, self.persistent_state['current_term'], self.commit_index, self.persistent_state['log'], True)
-        # self.track_and_send(msg, self.id_to_sock[i])
         self.send(msg, self.id_to_sock[i])
     self.heartbeat_timer = threading.Timer(self.leader_timeout/1000, self.send_heartbeats)
     self.heartbeat_timer.daemon = True
@@ -394,7 +379,6 @@ class Server():
           msg.appendEntriesRes.lastLogIndex = self.last_log_index(self.persistent_state['log'])
           msg.appendEntriesRes.success = True
           msg.appendEntriesRes.term = append_entries_req.leaderTerm
-          # print(self.server_id, ' log ' ,self.persistent_state['log'])
           self.save_to_storage()
           self.send(msg, sock)
     finally:
@@ -404,12 +388,6 @@ class Server():
   def handle_append_entries_res(self, append_entries_res, sock):
     self.lock.acquire()
     try:
-        # receiver = self.sock_to_id(sock)
-        # # duplicate, already handled
-        # if rpc_no not in self.pending_rpcs[receiver]:
-        #   return 
-
-        # del self.pending_rpcs[receiver][rpc_no]
       if append_entries_res.term > self.persistent_state['current_term']:
           self.persistent_state['current_term'] = append_entries_res.term
           self.convert_to_follower()
@@ -422,7 +400,6 @@ class Server():
         if self.last_log_index(self.persistent_state['log'])>= self.next_index[append_entries_res.id]:
           msg = self.append_entries_rpc(append_entries_res.id, self.persistent_state['current_term'], self.commit_index, self.persistent_state['log'], False, self.next_index[append_entries_res.id])
           self.save_to_storage()
-          # self.track_and_send(msg, self.id_to_sock[append_entries_res.id])
           self.send(msg, self.id_to_sock[append_entries_res.id])
         
         N = self.last_log_index(self.persistent_state['log'])
@@ -441,7 +418,6 @@ class Server():
       self.next_index[append_entries_res.id] -= 1
       msg = self.append_entries_rpc(append_entries_res.id, self.persistent_state['current_term'], self.commit_index, self.persistent_state['log'], False, self.next_index[append_entries_res.id])
       self.save_to_storage()
-      # self.track_and_send(msg, self.id_to_sock[append_entries_res.id])
       self.send(msg, self.id_to_sock[append_entries_res.id])
     finally:
       self.application_thr_cv.release()
@@ -449,7 +425,7 @@ class Server():
   def handle_client_request(self, client_req, sock):
     self.lock.acquire()
     try:
-      print(self.server_id, ' got ', client_req)
+      print(self.server_id, ' got client request ', client_req)
       if self.server_id != self.leader:
         if self.leader != None:
           msg = kv.RaftResponse()
@@ -466,10 +442,8 @@ class Server():
         return
       idx = self.last_log_index(self.persistent_state['log']) + 1
       self.persistent_state['log'][idx] = (client_req.cmd, self.persistent_state['current_term'], client_req.serialNo)
-      # print(self.persistent_state['log'])
       for i in self.id_to_sock:
         msg = self.append_entries_rpc(i, self.persistent_state['current_term'], self.commit_index, self.persistent_state['log'], False, self.next_index[i])
-        # self.track_and_send(msg, self.id_to_sock[i])
         self.send(msg, self.id_to_sock[i])
       self.reset_heartbeat_timer()
       self.match_index[self.server_id] = idx
@@ -586,7 +560,6 @@ class Server():
             if from_client is True:
               msg = kv.RaftRequest()
               text_format.Parse(payload, msg)
-              print(self.server_id, 'got data from client: ', msg)
               if msg.type == kv.RaftRequest.CRASH:
                 self.crash()
               elif msg.type == kv.RaftRequest.KV_REQ:
