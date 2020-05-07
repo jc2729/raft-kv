@@ -201,12 +201,10 @@ class Server():
         self.persistent_state['voted_for'] = self.server_id
         self.vote_count = 1
         self.reset_election_timer()
-        print('starting to send vote reqs')
     finally:
         self.lock.release()
     for i in self.id_to_sock:
         self.send(msg, self.id_to_sock[i])
-    print('finished sending vote reqs')
     
   def save_to_storage(self):
     with open(self.STORAGE, 'wb') as f:
@@ -271,7 +269,6 @@ class Server():
     self.send(msg, sock)
 
   def handle_vote_res(self, vote_res, sock):
-    # print(self.server_id, 'got vote res')
     self.lock.acquire()
     try:
       if vote_res.term > self.persistent_state['current_term']:
@@ -280,8 +277,8 @@ class Server():
           return
       if vote_res.candidateTerm != self.persistent_state['current_term']:
           return
-      self.vote_count += 1
-      # print(self.server_id, 'vote count', self.vote_count)
+      if vote_res.voteGranted:
+        self.vote_count += 1
       if self.role != 'leader' and self.vote_count >= int(self.n/2 + 1):
           # convert to leader
           self.role = 'leader'
@@ -302,7 +299,6 @@ class Server():
           self.heartbeat_timer = threading.Timer(self.leader_timeout/1000, self.send_heartbeats)
           self.heartbeat_timer.daemon = True
           self.heartbeat_timer.start()
-          # print(self.server_id, 'became leader')
     finally:
       self.lock.release()
         
@@ -455,13 +451,14 @@ class Server():
     try:
       print(self.server_id, ' got ', client_req)
       if self.server_id != self.leader:
-        msg = kv.RaftResponse()
-        msg.type = kv.RaftResponse.REDIRECT
-        msg.redirect.leaderId = self.leader
-        msg.redirect.originalRequest.serialNo = client_req.serialNo
-        msg.redirect.originalRequest.action = client_req.action
-        msg.redirect.originalRequest.cmd = client_req.cmd
-        self.send(msg, sock)
+        if self.leader != None:
+          msg = kv.RaftResponse()
+          msg.type = kv.RaftResponse.REDIRECT
+          msg.redirect.leaderId = self.leader
+          msg.redirect.originalRequest.serialNo = client_req.serialNo
+          msg.redirect.originalRequest.action = client_req.action
+          msg.redirect.originalRequest.cmd = client_req.cmd
+          self.send(msg, sock)
         return
 
       if client_req.serialNo in self.processed_serial_nos:

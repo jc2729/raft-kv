@@ -85,14 +85,12 @@ class ClientHandler(Thread):
                 self.valid = False
                 del threads[self.index]
                 self.sock.close()
-                print('done error handling')
                 break
             except Exception:
                 print (traceback.format_exc())
                 self.valid = False
                 del threads[self.index]
                 self.sock.close()
-                print('done error handling')
                 break
 
 
@@ -119,16 +117,12 @@ class ClientHandler(Thread):
 
 def send(index, msg, set_awaiting_res=False):
     global threads, awaiting_res
-    print('in send')
     pid = int(index)
     if pid not in threads:
-        print('returning')
         return
     if set_awaiting_res:
         awaiting_res = True
-    print('attempt send')
     threads[pid].send(msg)
-    print('finished?')
 
 def exit(exit=False):
     global threads, awaiting_res
@@ -150,61 +144,61 @@ def timeout():
     exit(True)
 
 def retry_random(serial_no):
-    print('in retry rand')
     global pending_rpcs, threads, leader, queued_rpcs, lock, awaiting_res
     lock.acquire()
     try:
-        pending_rpcs[serial_no][2].cancel()
-        retry_leader = leader if leader != pending_rpcs[serial_no][0] else random.sample(threads.keys(), 1)[0]
-        queued_rpcs.put((serial_no, (retry_leader, pending_rpcs[serial_no][1])))
+        if serial_no in pending_rpcs:
+            pending_rpcs[serial_no][2].cancel()
+            retry_leader = leader if leader != pending_rpcs[serial_no][0] else random.sample(threads.keys(), 1)[0]
+            queued_rpcs.put((serial_no, (retry_leader, pending_rpcs[serial_no][1])))
         awaiting_res = False
-        print(queued_rpcs.qsize())
     finally:
         lock.release()
 
 def try_requests():
-    print('in try requests')
-    global leader, leader_timeout, queued_rpcs, pending_rpcs
+    global leader, leader_timeout, queued_rpcs, pending_rpcs, awaiting_res
     lock.acquire()
     try:
         if queued_rpcs.qsize() > 0:
-            print('qsize nonzero')
             try:
               item = queued_rpcs.get(block=False)
-              print('item ', item)
-              print(item[1][1])
-              print(item[1][1].type)
-              print('beepboop')
-              print(item[1][1].type == kv.RaftRequest.Type.CRASH)
-              if item[1][1].type == kv.RaftRequest.Type.CRASH:
-                print('sending crash', item)
-                print('sendng to ', item[1][0])
+              if item[1][0] == 'start':
+                start(item[1][1], address, item[1][2], item[1][3])
+              elif item[1][1].type == kv.RaftRequest.Type.CRASH:
                 send(item[1][0], item[1][1])
-                print('done')
-              else:
+              elif not awaiting_res:
                 serial_no = item[1][1].request.serialNo
                 leader_timeout_thr = Timer(leader_timeout/1000, retry_random, args=[serial_no])
                 pending_rpcs[serial_no] = (item[1][0],item[1][1],leader_timeout_thr)
                 leader_timeout_thr.start()
-                print('sendng to ', item[1][0])
                 send(item[1][0], item[1][1], True)
             except:
-                print("some exception")
                 return
-        while queued_rpcs.qsize() > 0:
+        if queued_rpcs.qsize() > 0:
             try:
               item = queued_rpcs.get(block=False)
-              if item[1][1].type == kv.RaftRequest.Type.CRASH:
-                print('sending in second while to', item[1][0], item[1][1])
-                send(item[1][0], item[1][1])
+              if item[1][0] == 'start':
+                start(item[1][1], address, item[1][2], item[1][3])
               else:
                 queued_rpcs.put(item)
-                return
             except:
-                print("exception here?")
                 return
     finally:
         lock.release()
+
+def start(pid, address, port, n):
+    # if debug:
+    process = subprocess.Popen(['./process', str(pid), n, str(port)], preexec_fn=os.setsid)
+    # else:
+    # process = subprocess.Popen(['./process', str(pid), n, str(port)], stdout=open('/dev/null', 'w'),
+    # stderr=open('/dev/null', 'w'), preexec_fn=os.setsid)
+
+    # sleep for a while to allow the process to set up
+    time.sleep(3)
+    handler = ClientHandler(pid, address, port, process)
+    threads[pid] = handler
+    handler.start()
+    time.sleep(0.1)
 
 def main(debug=False):
     global leader, threads, awaiting_res, lock, serial_no, pending_rpcs, leader_timeout
@@ -224,7 +218,6 @@ def main(debug=False):
     for line in temp_lines:
         server_cmd = line.split()
         try:
-            print(server_cmd[0])
             pid = int(server_cmd[0])  
         except ValueError:
             print ("Invalid pid: " + server_cmd[0])
@@ -234,20 +227,10 @@ def main(debug=False):
         if cmd == 'start':
             n = server_cmd[2]
             port = int(server_cmd[3])
+            queued_rpcs.put((serial_no, (cmd, pid, port, n)))
+            serial_no += 1
 
-            if debug:
-                process = subprocess.Popen(['./process', str(pid), n, str(port)], preexec_fn=os.setsid)
-            else:
-                process = subprocess.Popen(['./process', str(pid), n, str(port)], stdout=open('/dev/null', 'w'),
-                    stderr=open('/dev/null', 'w'), preexec_fn=os.setsid)
-
-            # sleep for a while to allow the process to set up
-            time.sleep(3)
-
-            handler = ClientHandler(pid, address, port, process)
-            threads[pid] = handler
-            handler.start()
-            time.sleep(0.1)
+            
         elif cmd == 'crash':
             msg = kv.RaftRequest()
             msg.type = kv.RaftRequest.Type.CRASH
@@ -298,8 +281,7 @@ def main(debug=False):
                 lock.release()
         
     while True:
-        if not awaiting_res:
-            try_requests()
+        try_requests()
         time.sleep(2)
 
 

@@ -203,7 +203,6 @@ exit
 
 
 ### Recovered should catch up
-* conflicting leaders
 * two recovery cases
 
 0 start 5 10000
@@ -227,7 +226,7 @@ exit
 exit
 
 
-### Recovered should catch up
+### Recovered should catch up and progress
 0 start 5 10000
 1 start 5 10001
 2 start 5 10002
@@ -241,12 +240,14 @@ exit
 0 crash
 -1 put y 9
 1 crash
--1 put x 5
+2 crash
 -1 get x
 0 start 5 10000
 -1 put x 155
 -1 get x
 1 start 5 10001
--1 put y 174
+-1 append y 174
 -1 get y
 exit
+
+expect 3 10 stall 7 155 9174
