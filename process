@@ -1,2 +1,2 @@
 #!/bin/bash
-python3 ./raft/server.py $1 $2 $3
+python3 ./raft/server.py $1 $2 $3 $4

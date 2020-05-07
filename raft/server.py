@@ -21,34 +21,49 @@ class Server():
   Receives connections and establishes handlers for the client and other servers.
   """
 
-  def __init__(self, server_id, address, n):
+  def __init__(self, server_id, address, n, num_clients):
     """
     Sets up this server to (1) connect to other servers and (2) connect to client
     """
     self.sel = selectors.DefaultSelector()
     self.logger = logging.getLogger('Server')
     logging.basicConfig(filename='test.log', level=logging.DEBUG)
-    
-    self.client_port : int = address[1]
+    print(address)
+    self.master_port : int = address[1]
     self.server_id : int = server_id
     self.server_port : int = 20000 + self.server_id
+    self.client_port_base : int = 21000 + 1000 * self.server_id
+
+    self.client_lsocks = {} # lsock : id 
     
-    # establish a listening TCP endpoint to client
-    self.client_lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    self.client_lsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # establish a listening TCP endpoint to master
+    self.master_lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    self.master_lsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     # establish a listening TCP endpoint for other servers
     self.server_lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     self.server_lsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
     self.n = n
 
-    # bind to client-facing port; assumed guaranteed to be available
+    # bind to master-facing port; assumed guaranteed to be available
     while True:
       try:
-        self.client_lsock.bind(address)
+        self.master_lsock.bind(address)
         break
       except:
         pass
+
+    # bind to client-facing ports
+    for i in range(num_clients):
+      client_lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+      client_lsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+      try:
+        client_lsock.bind(('localhost', self.client_port_base+i))
+        print('binding to ', ('localhost', self.client_port_base+i))
+      except:
+        print('cannot bind')
+      self.client_lsocks[i] = client_lsock
 
     # bind to server-facing port; available by port assigning convention
     while True:
@@ -58,7 +73,8 @@ class Server():
       except:
         pass
 
-    self.client_csock = None
+    self.master_csock = None
+    self.client_id_to_sock = {}
 
     # map server IDs to sockets
     self.id_to_sock = {server:None for server in range(self.n)}
@@ -79,10 +95,15 @@ class Server():
       data = types.SimpleNamespace(connid=i, outb=b'')
       self.sel.register(csock, events, data=data)
 
-    # finish setting up our client listening socket
-    self.client_lsock.listen(int(n))
-    self.client_lsock.setblocking(False)
-    self.sel.register(self.client_lsock, selectors.EVENT_READ, data=None)
+    # finish setting up our master listening socket
+    self.master_lsock.listen(int(n))
+    self.master_lsock.setblocking(False)
+    self.sel.register(self.master_lsock, selectors.EVENT_READ, data=None)
+
+    for client in self.client_lsocks:
+      self.client_lsocks[client].listen(int(n))
+      self.client_lsocks[client].setblocking(False)
+      self.sel.register(self.client_lsocks[client], selectors.EVENT_READ, data=None)
 
     # finish setting up our server listening socket
     self.server_lsock.listen(int(n))
@@ -97,15 +118,14 @@ class Server():
       self.persistent_state = {
         'current_term': 0,
         'voted_for': None, # reset always when current term changes
-        'log': {} # log[index] = (cmd, term, serial_no) where cmd one of: "PUT key val", "GET key", or "APPEND key val"
+        'log': {} # log[index] = (cmd, term, serial_no, client) where cmd one of: "PUT key val", "GET key", or "APPEND key val"
       }
 
     # volatile state on ALL servers
     self.commit_index = 0
-    self.processed_serial_nos = {}
+    self.processed_serial_nos = {c:{} for c in range(num_clients)}
     self.last_applied = 0
     self.state = {}
-    self.latest_client_res = ()
 
     self.role = 'follower' # valid states: 'follower', 'leader', 'candidate'
     self.election_timeout_lower = 150
@@ -277,7 +297,7 @@ class Server():
           next_index = self.last_log_index(self.persistent_state['log']) + 1
           self.next_index = {server:next_index for server in range(self.n)}
           self.match_index = {server:0 for server in range(self.n)}
-          self.client_rpcs = {}
+
           self.save_to_storage()
           for i in self.id_to_sock:
               msg = self.append_entries_rpc(i, self.persistent_state['current_term'], self.commit_index, self.persistent_state['log'], True)
@@ -305,6 +325,7 @@ class Server():
         l.command = log[k][0]
         l.term = log[k][1]
         l.serialNo = log[k][2]
+        l.client = log[k][3]
         msg.appendEntriesReq.entries.extend([l])
     prev_log_idx = receiver_next_index - 1
     msg.appendEntriesReq.prevLogIndex = prev_log_idx
@@ -362,11 +383,11 @@ class Server():
           last_new_idx = self.commit_index
           for e in append_entries_req.entries:
             if idx not in self.persistent_state['log']:
-              self.persistent_state['log'][idx] = (e.command, e.term, e.serialNo)
+              self.persistent_state['log'][idx] = (e.command, e.term, e.serialNo, e.client)
               last_new_idx = idx
             elif idx in self.persistent_state['log'] and e.term != self.persistent_state['log'][idx][1]:
               self.persistent_state['log'] = {l:self.persistent_state['log'][l] for l in self.persistent_state['log'] if l < idx}
-              self.persistent_state['log'][idx] = (e.command, e.term, e.serialNo)
+              self.persistent_state['log'][idx] = (e.command, e.term, e.serialNo, e.client)
               last_new_idx = idx
             idx += 1
           if append_entries_req.leaderCommit > self.commit_index:
@@ -438,10 +459,10 @@ class Server():
         return
 
       if client_req.serialNo in self.processed_serial_nos:
-        self.send(self.processed_serial_nos[client_req.serialNo], sock)
+        self.send(self.processed_serial_nos[client_req.client][client_req.serialNo], sock)
         return
       idx = self.last_log_index(self.persistent_state['log']) + 1
-      self.persistent_state['log'][idx] = (client_req.cmd, self.persistent_state['current_term'], client_req.serialNo)
+      self.persistent_state['log'][idx] = (client_req.cmd, self.persistent_state['current_term'], client_req.serialNo, client_req.client)
       for i in self.id_to_sock:
         msg = self.append_entries_rpc(i, self.persistent_state['current_term'], self.commit_index, self.persistent_state['log'], False, self.next_index[i])
         self.send(msg, self.id_to_sock[i])
@@ -497,11 +518,12 @@ class Server():
         if msg.result.action == kv.Action.GET:
             state = [action_var_val[1]+'='+(self.state[action_var_val[1]] if action_var_val[1] in self.state else "")]
             msg.result.state.extend(state)
-        self.processed_serial_nos = {} # assume 1 client
-        self.processed_serial_nos[serial_no] = msg
+        # processed_serial_nos[client][serial_no] 
+        client = self.persistent_state['log'][l][3]
+        self.processed_serial_nos[client][serial_no] = msg 
 
         if self.role == 'leader':
-          self.send(msg, self.client_csock)
+          self.send(msg, self.client_id_to_sock[client])
 
         self.last_applied += 1
       self.application_thr_cv.release()
@@ -522,8 +544,11 @@ class Server():
     self.sel.register(conn, events, data=data)
 
     # request ID of the connecting server so we can map the socket for comm
-    if self.client_csock is None and sock == self.client_lsock:
-      self.client_csock = conn
+    if self.master_csock is None and sock == self.master_lsock:
+      self.master_csock = conn
+    elif sock in self.client_lsocks.values():
+      client = [c for c,lsock in self.client_lsocks.items() if lsock == sock][0]
+      self.client_id_to_sock[client] = conn
     else:
       msg = rpc.Rpc()
       msg.type = rpc.Rpc.REQUEST_HANDSHAKE
@@ -554,16 +579,13 @@ class Server():
             else:
               recv_buffer = ''
 
-            # determine the requester
-            from_client = (sock == self.client_csock)
 
-            if from_client is True:
+            if sock == self.master_csock:
+              self.crash()
+            elif sock in self.client_id_to_sock.values():
               msg = kv.RaftRequest()
               text_format.Parse(payload, msg)
-              if msg.type == kv.RaftRequest.CRASH:
-                self.crash()
-              elif msg.type == kv.RaftRequest.KV_REQ:
-                self.handle_client_request(msg.request, sock)
+              self.handle_client_request(msg.request, sock)
             else:
               msg = rpc.Rpc()
               text_format.Parse(payload, msg)
@@ -611,19 +633,20 @@ class Server():
 
 if __name__ == '__main__':
 
-  parser = argparse.ArgumentParser(description='Process [pid] [n] [port]')
+  parser = argparse.ArgumentParser(description='Process [pid] [n] [port] [num clients]')
   parser.add_argument('pid', type=int, nargs='+',
                    help='the process ID')
   parser.add_argument('n', type=int, nargs='+',
                    help='the number of servers')
   parser.add_argument('port', type=int, nargs='+',
                    help='the server port') # 60000 + i
-
+  parser.add_argument('num_clients', type=int, nargs='+',
+                   help='the number of clients')
   logging.basicConfig(level=logging.DEBUG,
                       format='%(name)s: %(message)s',)
 
   args = parser.parse_args()
 
   address = ('localhost', args.port[0])
-  server = Server(args.pid[0], address, args.n[0])
+  server = Server(args.pid[0], address, args.n[0], args.num_clients[0])
   server.start()

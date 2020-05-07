@@ -4,6 +4,7 @@ Client
 """
 
 import os
+import argparse
 import signal
 import subprocess
 import raft.kv_pb2 as kv
@@ -15,6 +16,7 @@ from google.protobuf import text_format
 from queue import Queue, PriorityQueue
 from socket import SOCK_STREAM, socket, AF_INET
 from threading import Thread, Timer, Lock
+import logging
 
 address = 'localhost'
 threads = {}
@@ -29,15 +31,14 @@ queued_rpcs = PriorityQueue() # item: ((serial_no, (leader, msg)))
 
 
 class ClientHandler(Thread):
-    def __init__(self, index, address, port, process):
+    def __init__(self, index, address, port):
         Thread.__init__(self)
         self.index = index
         self.sock = socket(AF_INET, SOCK_STREAM)
+        print('client connecting to', (address, port))
         self.sock.connect((address, port))
         self.buffer = ""
         self.valid = True
-        self.process = process
-
     def handle_payload(self, payload):
         global awaiting_res, queued_rpcs, pending_rpcs, leader, lock
         awaiting_res = False
@@ -56,6 +57,7 @@ class ClientHandler(Thread):
 
                 new_msg = kv.RaftRequest()
                 new_msg.type = kv.RaftRequest.Type.KV_REQ
+                new_msg.request.client = cid
                 new_msg.request.action = msg.redirect.originalRequest.action
                 new_msg.request.serialNo = msg.redirect.originalRequest.serialNo
                 new_msg.request.cmd = msg.redirect.originalRequest.cmd
@@ -93,15 +95,6 @@ class ClientHandler(Thread):
                 self.sock.close()
                 break
 
-
-    def kill(self):
-        if self.valid:
-            try:
-                os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
-            except:
-                pass
-            self.close()
-
     def send(self, s):
         if self.valid:
             self.sock.send((text_format.MessageToString(s) + '*').encode('utf-8'))
@@ -124,24 +117,9 @@ def send(index, msg, set_awaiting_res=False):
         awaiting_res = True
     threads[pid].send(msg)
 
-def exit(exit=False):
-    global threads, awaiting_res
-    wait = awaiting_res and (not exit)
-    while wait:
-        time.sleep(0.01)
-        wait = awaiting_res
-
-    time.sleep(2)
-    for k in threads:
-        threads[k].kill()
-    subprocess.Popen(['./stopall'], stdout=open('/dev/null'), stderr=open('/dev/null'))
-    time.sleep(0.1)
-    os._exit(0)
-
 
 def timeout():
     time.sleep(3000)
-    exit(True)
 
 def retry_random(serial_no):
     global pending_rpcs, threads, leader, queued_rpcs, lock, awaiting_res
@@ -186,14 +164,6 @@ def try_requests():
     finally:
         lock.release()
 
-def start(pid, address, port, n):
-    process = subprocess.Popen(['./process', str(pid), n, str(port)], preexec_fn=os.setsid)
-    time.sleep(3)
-    handler = ClientHandler(pid, address, port, process)
-    threads[pid] = handler
-    handler.start()
-    time.sleep(0.1)
-
 def main():
     global leader, threads, awaiting_res, lock, serial_no, pending_rpcs, leader_timeout
     timeout_thread = Thread(target=timeout, args=[])
@@ -207,7 +177,7 @@ def main():
                 break
             temp_lines.append(line)
         except:  # keyboard exception
-            exit(True)
+            print('exception')
 
     for line in temp_lines:
         server_cmd = line.split()
@@ -215,25 +185,25 @@ def main():
             pid = int(server_cmd[0])  
         except ValueError:
             print ("Invalid pid: " + server_cmd[0])
-            exit(True)
 
         cmd = server_cmd[1] 
         if cmd == 'start':
             n = server_cmd[2]
-            port = int(server_cmd[3])
-            queued_rpcs.put((serial_no, (cmd, pid, port, n)))
-            serial_no += 1
+            global cid
+            port = 21000 + pid*1000 + cid
 
-            
-        elif cmd == 'crash':
-            msg = kv.RaftRequest()
-            msg.type = kv.RaftRequest.Type.CRASH
-            queued_rpcs.put((serial_no, (pid, msg)))
-            serial_no += 1
+            # sleep for a while to allow the process to conn
+            time.sleep(3)
+
+            handler = ClientHandler(pid, address, port)
+            threads[pid] = handler
+            handler.start()
+            time.sleep(0.1)
 
         elif cmd == 'get':
             msg = kv.RaftRequest()
             msg.type = kv.RaftRequest.Type.KV_REQ
+            msg.request.client = cid
             msg.request.action = kv.Action.GET
             predicted_leader = leader
             lock.acquire()
@@ -247,6 +217,7 @@ def main():
                 lock.release()
         elif cmd == 'put':
             msg = kv.RaftRequest()
+            msg.request.client = cid
             msg.type = kv.RaftRequest.Type.KV_REQ
             msg.request.action = kv.Action.PUT
             predicted_leader = leader
@@ -261,6 +232,7 @@ def main():
                 lock.release()
         elif cmd == 'append':
             msg = kv.RaftRequest()
+            msg.request.client = cid
             msg.type = kv.RaftRequest.Type.KV_REQ
             msg.request.action = kv.Action.APPEND
             predicted_leader = leader
@@ -280,4 +252,14 @@ def main():
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='client [cid]')
+    parser.add_argument('cid', type=int, nargs='+',
+                   help='the client ID')
+    
+    logging.basicConfig(level=logging.DEBUG,
+                      format='%(name)s: %(message)s',)
+
+    args = parser.parse_args()
+    global cid
+    cid = args.cid[0]
     main()

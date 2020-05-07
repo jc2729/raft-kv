@@ -14,6 +14,7 @@ message KVRequest {
 	required int32 serialNo = 1;
 	required Action action = 2; // 'get as in get all', 'put'
 	optional string cmd = 3;
+	required int32 client = 4;
 }
 
 message RaftResponse {
