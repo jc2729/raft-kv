@@ -108,7 +108,7 @@ def exit(exit=False):
 
 
 def timeout():
-    time.sleep(120)
+    time.sleep(600)
     exit(True)
 
 def main():

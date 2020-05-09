@@ -24,11 +24,12 @@ awaiting_res = False
 leader_timeout = 1000
 
 lock = Lock()
-leader = 0
+leader = 1
 serial_no = 8000
 pending_rpcs = {} # sent but awaiting response; pending_rpc[serial_no] = (leader, msg, timeout thr)
 queued_rpcs = PriorityQueue() # item: ((serial_no, (leader, msg)))
 
+latency = {} # latency[serial_no]: [start, end]
 
 class ClientHandler(Thread):
     def __init__(self, index, address, port):
@@ -54,7 +55,6 @@ class ClientHandler(Thread):
                 if serial_no in pending_rpcs:
                     pending_rpcs[serial_no][2].cancel()
                     del pending_rpcs[serial_no]
-
                 new_msg = kv.RaftRequest()
                 new_msg.type = kv.RaftRequest.Type.KV_REQ
                 new_msg.request.client = cid
@@ -62,11 +62,12 @@ class ClientHandler(Thread):
                 new_msg.request.serialNo = msg.redirect.originalRequest.serialNo
                 new_msg.request.cmd = msg.redirect.originalRequest.cmd
 
-                queued_rpcs.put((serial_no, (msg.redirect.leaderId, new_msg)))
+                queued_rpcs.put((serial_no, (new_msg)))
             elif msg.type == kv.RaftResponse.KV_RES:
                 if msg.result.serialNo in pending_rpcs:
                     pending_rpcs[msg.result.serialNo][2].cancel()
                     del pending_rpcs[msg.result.serialNo]
+                    latency[msg.result.serialNo].append(time.time())
                 if msg.result.action == kv.Action.GET:
                     print('***************requested state below***************\n', msg.result.state)
         finally:
@@ -97,7 +98,10 @@ class ClientHandler(Thread):
 
     def send(self, s):
         if self.valid:
-            self.sock.send((text_format.MessageToString(s) + '*').encode('utf-8'))
+            try:
+                self.sock.send((text_format.MessageToString(s) + '*').encode('utf-8'))
+            except:
+                print('send failed')
         else:
             print ("Socket invalid")
 
@@ -127,8 +131,7 @@ def retry_random(serial_no):
     try:
         if serial_no in pending_rpcs:
             pending_rpcs[serial_no][2].cancel()
-            retry_leader = leader if leader != pending_rpcs[serial_no][0] else random.sample(threads.keys(), 1)[0]
-            queued_rpcs.put((serial_no, (retry_leader, pending_rpcs[serial_no][1])))
+            queued_rpcs.put((serial_no, (pending_rpcs[serial_no][1])))
         awaiting_res = False
     finally:
         lock.release()
@@ -139,26 +142,21 @@ def try_requests():
     try:
         if queued_rpcs.qsize() > 0:
             try:
-              item = queued_rpcs.get(block=False)
-              if item[1][0] == 'start':
-                start(item[1][1], address, item[1][2], item[1][3])
-              elif item[1][1].type == kv.RaftRequest.Type.CRASH:
-                send(item[1][0], item[1][1])
-              elif not awaiting_res:
-                serial_no = item[1][1].request.serialNo
+              if not awaiting_res:
+                item = queued_rpcs.get(block=False)
+                serial_no = item[1].request.serialNo
                 leader_timeout_thr = Timer(leader_timeout/1000, retry_random, args=[serial_no])
-                pending_rpcs[serial_no] = (item[1][0],item[1][1],leader_timeout_thr)
+                if serial_no in pending_rpcs:
+                    recipient = leader if leader != pending_rpcs[serial_no][0] else random.sample(threads.keys(), 1)[0]
+                else:
+                    recipient = leader
+                pending_rpcs[serial_no] = (recipient,item[1],leader_timeout_thr)
                 leader_timeout_thr.start()
-                send(item[1][0], item[1][1], True)
-            except:
-                return
-        if queued_rpcs.qsize() > 0:
-            try:
-              item = queued_rpcs.get(block=False)
-              if item[1][0] == 'start':
-                start(item[1][1], address, item[1][2], item[1][3])
-              else:
-                queued_rpcs.put(item)
+                
+                send(recipient, item[1], True)
+                # latency #
+                latency[serial_no] = [time.time()]
+                ###########
             except:
                 return
     finally:
@@ -190,10 +188,10 @@ def main():
         if cmd == 'start':
             n = server_cmd[2]
             global cid
-            port = 21000 + pid*1000 + cid
+            
+            port = 21000 + pid*100 + cid
 
             # sleep for a while to allow the process to conn
-            time.sleep(3)
 
             handler = ClientHandler(pid, address, port)
             threads[pid] = handler
@@ -205,13 +203,11 @@ def main():
             msg.type = kv.RaftRequest.Type.KV_REQ
             msg.request.client = cid
             msg.request.action = kv.Action.GET
-            predicted_leader = leader
             lock.acquire()
             try:
-                predicted_leader = leader
                 msg.request.serialNo = serial_no 
                 msg.request.cmd = "GET " + server_cmd[2]
-                queued_rpcs.put((serial_no, (leader, msg)))
+                queued_rpcs.put((serial_no, (msg)))
                 serial_no += 1
             finally:
                 lock.release()
@@ -220,13 +216,11 @@ def main():
             msg.request.client = cid
             msg.type = kv.RaftRequest.Type.KV_REQ
             msg.request.action = kv.Action.PUT
-            predicted_leader = leader
             lock.acquire()
             try:
-                predicted_leader = leader
                 msg.request.serialNo = serial_no 
                 msg.request.cmd = "PUT " + server_cmd[2]+ ' ' + server_cmd[3]
-                queued_rpcs.put((serial_no, (leader, msg)))
+                queued_rpcs.put((serial_no, (msg)))
                 serial_no += 1
             finally:
                 lock.release()
@@ -235,20 +229,28 @@ def main():
             msg.request.client = cid
             msg.type = kv.RaftRequest.Type.KV_REQ
             msg.request.action = kv.Action.APPEND
-            predicted_leader = leader
             lock.acquire()
             try:
-                predicted_leader = leader
                 msg.request.serialNo = serial_no 
                 msg.request.cmd = "APPEND " + server_cmd[2]+' '+server_cmd[3]
-                queued_rpcs.put((serial_no, (leader, msg)))
+                queued_rpcs.put((serial_no, (msg)))
                 serial_no += 1
             finally:
                 lock.release()
         
     while True:
         try_requests()
-        time.sleep(2)
+        lock.acquire()
+        if queued_rpcs.qsize() == 0 and len(pending_rpcs) == 0:
+            break
+        lock.release()
+        time.sleep(1)
+
+    print(cid, 'has latencies', latency)
+    total_lat = 0
+    for serial_no in latency:
+        total_lat += latency[serial_no][1]-latency[serial_no][0]
+    print(cid, 'has', len(latency), 'requests with total latency', total_lat)
 
 
 if __name__ == '__main__':

@@ -32,8 +32,8 @@ class Server():
     self.master_port : int = address[1]
     self.server_id : int = server_id
     self.server_port : int = 20000 + self.server_id
-    self.client_port_base : int = 21000 + 1000 * self.server_id
-
+    self.client_port_base : int = 21000 + 100 * self.server_id
+    self.partial_payload = ''
     self.client_lsocks = {} # lsock : id 
     
     # establish a listening TCP endpoint to master
@@ -458,9 +458,9 @@ class Server():
           self.send(msg, sock)
         return
 
-      if client_req.serialNo in self.processed_serial_nos:
-        self.send(self.processed_serial_nos[client_req.client][client_req.serialNo], sock)
-        return
+      # if client_req.serialNo in self.processed_serial_nos:
+      #   self.send(self.processed_serial_nos[client_req.client][client_req.serialNo], sock)
+      #   return
       idx = self.last_log_index(self.persistent_state['log']) + 1
       self.persistent_state['log'][idx] = (client_req.cmd, self.persistent_state['current_term'], client_req.serialNo, client_req.client)
       for i in self.id_to_sock:
@@ -568,16 +568,15 @@ class Server():
       try:
         recv_data = sock.recv(4096)  # Should be ready to read
         if recv_data:
-          recv_buffer = recv_data.decode('utf-8')
-          
+          recv_buffer = self.partial_payload + recv_data.decode('utf-8')
+          self.partial_payload = ''
           while len(recv_buffer) > 0:
-            payload = recv_buffer
-
             if '*' in recv_buffer:
               payload = recv_buffer[:recv_buffer.index('*')]
               recv_buffer = recv_buffer[recv_buffer.index('*') + 1:]
             else:
-              recv_buffer = ''
+              self.partial_payload = recv_buffer
+              break
 
 
             if sock == self.master_csock:
@@ -586,6 +585,7 @@ class Server():
               msg = kv.RaftRequest()
               text_format.Parse(payload, msg)
               self.handle_client_request(msg.request, sock)
+              payload = ''
             else:
               msg = rpc.Rpc()
               text_format.Parse(payload, msg)
@@ -601,6 +601,7 @@ class Server():
                 self.handle_append_entries(msg.appendEntriesReq, sock)
               elif msg.type == rpc.Rpc.APPEND_ENTRIES_RES:
                 self.handle_append_entries_res(msg.appendEntriesRes, sock)
+              payload = ''
         else:
           self.process_connection_fail(sock)
       except ConnectionError:
