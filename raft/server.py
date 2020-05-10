@@ -13,6 +13,7 @@ import socket
 import sys
 import threading
 import types
+import time
 
 from google.protobuf import text_format
 
@@ -164,6 +165,7 @@ class Server():
     """
     Immediately crashes this server
     """
+    print(time.time(), 'crashing')
     sys.exit(0)
 
   def sock_to_id(self,sock):
@@ -361,7 +363,7 @@ class Server():
               self.convert_to_follower()
           self.persistent_state['current_term'] = append_entries_req.leaderTerm
           self.leader = append_entries_req.leaderId
-          print(self.server_id, '\'s leader is ', self.leader, ' at term ', self.persistent_state['current_term'])
+          print(self.server_id, '\'s leader is ', self.leader, ' at term ', self.persistent_state['current_term'], 'at time', time.time())
           # vacuously true if leader has no entries
           if append_entries_req.prevLogIndex == constant.EMPTY_LOG_LAST_LOG_INDEX and len(append_entries_req.entries) == 0:
             msg.appendEntriesRes.success = True
@@ -520,6 +522,7 @@ class Server():
             msg.result.state.extend(state)
         # processed_serial_nos[client][serial_no] 
         client = self.persistent_state['log'][l][3]
+        print(self.server_id, self.persistent_state['log'][l])
         self.processed_serial_nos[client][serial_no] = msg 
 
         if self.role == 'leader':

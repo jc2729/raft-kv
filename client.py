@@ -29,8 +29,8 @@ serial_no = 8000
 pending_rpcs = {} # sent but awaiting response; pending_rpc[serial_no] = (leader, msg, timeout thr)
 queued_rpcs = PriorityQueue() # item: ((serial_no, (leader, msg)))
 
-latency = {} # latency[serial_no]: [start, end]
-
+#latency = {} # latency[serial_no]: [start, end]
+tput = []
 class ClientHandler(Thread):
     def __init__(self, index, address, port):
         Thread.__init__(self)
@@ -67,7 +67,7 @@ class ClientHandler(Thread):
                 if msg.result.serialNo in pending_rpcs:
                     pending_rpcs[msg.result.serialNo][2].cancel()
                     del pending_rpcs[msg.result.serialNo]
-                    latency[msg.result.serialNo].append(time.time())
+                    #latency[msg.result.serialNo].append(time.time())
                 if msg.result.action == kv.Action.GET:
                     print('***************requested state below***************\n', msg.result.state)
         finally:
@@ -99,6 +99,7 @@ class ClientHandler(Thread):
     def send(self, s):
         if self.valid:
             try:
+                print(s)
                 self.sock.send((text_format.MessageToString(s) + '*').encode('utf-8'))
             except:
                 print('send failed')
@@ -152,10 +153,10 @@ def try_requests():
                     recipient = leader
                 pending_rpcs[serial_no] = (recipient,item[1],leader_timeout_thr)
                 leader_timeout_thr.start()
-                
+                tput.append(time.time())
                 send(recipient, item[1], True)
                 # latency #
-                latency[serial_no] = [time.time()]
+                #latency[serial_no] = [time.time()]
                 ###########
             except:
                 return
@@ -245,12 +246,14 @@ def main():
             break
         lock.release()
         time.sleep(1)
+    tput.append(time.time())
+    print(cid, 'has 30 reqs in', tput[-1] - tput[0])
 
-    print(cid, 'has latencies', latency)
-    total_lat = 0
-    for serial_no in latency:
-        total_lat += latency[serial_no][1]-latency[serial_no][0]
-    print(cid, 'has', len(latency), 'requests with total latency', total_lat)
+    # print(cid, 'has latencies', latency)
+    # total_lat = 0
+    # for serial_no in latency:
+    #     total_lat += latency[serial_no][1]-latency[serial_no][0]
+    # print(cid, 'has', len(latency), 'requests with total latency', total_lat)
 
 
 if __name__ == '__main__':
