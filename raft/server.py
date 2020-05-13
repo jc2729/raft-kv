@@ -364,6 +364,7 @@ class Server():
           self.persistent_state['current_term'] = append_entries_req.leaderTerm
           self.leader = append_entries_req.leaderId
           print(self.server_id, '\'s leader is ', self.leader, ' at term ', self.persistent_state['current_term'], 'at time', time.time())
+          print(self.persistent_state['log'])
           # vacuously true if leader has no entries
           if append_entries_req.prevLogIndex == constant.EMPTY_LOG_LAST_LOG_INDEX and len(append_entries_req.entries) == 0:
             msg.appendEntriesRes.success = True
